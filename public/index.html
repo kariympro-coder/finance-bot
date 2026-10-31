@@ -1,4 +1,4 @@
-<!doctype html>
+ <!doctype html>
 <html lang="uz">
 <head>
 <meta charset="utf-8">
@@ -63,13 +63,13 @@
 <body>
 <div class="wrap">
   <div class="top"><h1>💰 Moliya</h1><span id="rateChip" class="chip hidden"></span></div>
-
+ 
   <div id="login" class="card">
-    <input id="pw" type="password" placeholder="Parol" autocomplete="current-password">
+    <input id="pw" type="password" placeholder="Parol" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false">
     <button id="loginBtn">Kirish</button>
     <div id="loginMsg" class="msg"></div>
   </div>
-
+ 
   <div id="app" class="hidden">
     <div class="card">
       <textarea id="text" placeholder="Masalan: Kecha Jarvis reklamasiga 300 ming Uzcarddan, bugun taksiga 50 ming naqd. Uzcarddan 500 ming naqd yechdim."></textarea>
@@ -83,7 +83,7 @@
       <div class="hint">Yozing, <b>📷 chek</b> yoki bank ilovasi skrinshotini yuboring, yoki <b>🎤</b> bosib ayting. Rasmga izoh kerak bo'lsa ("Jarvis uchun", "Humo kartadan") — avval matnga yozib, keyin rasmni tanlang. Dollar bo'lsa "$" deng — kurs Markaziy bankdan.</div>
       <div id="sendMsg" class="msg"></div>
     </div>
-
+ 
     <div class="card">
       <h2>Hisoblar <button id="manageBtn" class="ghost small">⚙️ Sozlash</button></h2>
       <div class="hint" style="margin-top:0">Jami (so'mda)</div>
@@ -91,7 +91,7 @@
       <div id="accounts"></div>
       <div id="manage" class="hidden"></div>
     </div>
-
+ 
     <div class="card">
       <h2 id="monthTitle">Shu oy</h2>
       <div class="totals">
@@ -101,25 +101,25 @@
       </div>
       <div class="hint">So'mda; dollar yozuvlari yozilgan kungi kurs bilan hisoblangan. O'tkazmalar bu yerga kirmaydi.</div>
     </div>
-
+ 
     <div class="card">
       <h2>Kategoriyalar</h2>
       <div id="cats"></div>
     </div>
-
+ 
     <div class="card">
       <h2>Oxirgi yozuvlar</h2>
       <div id="recent"></div>
     </div>
   </div>
 </div>
-
+ 
 <script>
 const $ = (id) => document.getElementById(id);
 let password = "";
 try { password = sessionStorage.getItem("pw") || ""; } catch {}
 let state = null;
-
+ 
 const fmt = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU").replace(/,/g, " ");
 const fmtCur = (n, c) => {
   if (c === "USD") return "$" + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-US");
@@ -129,7 +129,7 @@ const fmtCur = (n, c) => {
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const KIND = { naqd: "💵 Naqd", karta: "💳 Karta", bank: "🏦 Bank" };
-
+ 
 async function api(action, extra = {}) {
   const res = await fetch("/api", {
     method: "POST",
@@ -140,7 +140,7 @@ async function api(action, extra = {}) {
   if (!res.ok) throw new Error(data.error || "Xato");
   return data;
 }
-
+ 
 async function login() {
   password = $("pw").value.trim();
   $("loginMsg").textContent = "";
@@ -152,21 +152,21 @@ async function login() {
     $("loginMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 }
-
+ 
 function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   load();
 }
-
+ 
 function savedLine(s) {
   if (s.kind === "transfer") return `↔ ${esc(s.from)} → ${esc(s.to)}: ${fmtCur(s.amount, s.currency)}${s.currency !== s.to_currency ? " → " + fmtCur(s.to_amount, s.to_currency) : ""} (${s.date})`;
   const what = s.kind === "income" ? "Daromad" : esc(s.category);
   return `${what} — ${fmtCur(s.amount, s.currency)}, ${esc(s.note)}${s.account ? " · " + esc(s.account) : ""} (${s.date})`;
 }
-
+ 
 function busy(on) { ["sendBtn", "photoBtn"].forEach((id) => ($(id).disabled = on)); if (!recorder) $("micBtn").disabled = on; }
-
+ 
 async function send(media) {
   const text = $("text").value.trim();
   if (!text && !media) return;
@@ -186,7 +186,7 @@ async function send(media) {
     $("preview").classList.add("hidden");
   }
 }
-
+ 
 // ---------- 📷 Chek rasmi: telefonda kamera ochiladi; rasm 1600px gacha kichraytirilib yuboriladi ----------
 function shrinkImage(file) {
   return new Promise((resolve, reject) => {
@@ -215,7 +215,7 @@ async function onPhoto(ev) {
     await send({ image: { mime: "image/jpeg", data: dataUrl.split(",")[1] } });
   } catch (e) { $("sendMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
-
+ 
 // ---------- 🎤 Ovoz: bosib gapiring, yana bosing — WAV (16 kHz) qilib yuboriladi ----------
 let recorder = null, chunks = [], recTimer = null, recStart = 0;
 function wavFromBuffer(buf) {
@@ -267,7 +267,7 @@ async function toggleMic() {
   tick(); recTimer = setInterval(tick, 500);
   $("sendMsg").textContent = "Gapiring… tugatgach ⏹ ni bosing (1 daqiqagacha)";
 }
-
+ 
 function renderAccounts(d) {
   $("netWorth").textContent = fmt(d.netWorth) + " so'm";
   $("accounts").innerHTML = d.accounts.length ? d.accounts.map((a) => `
@@ -276,7 +276,7 @@ function renderAccounts(d) {
       <div class="amt ${a.balance < 0 ? "neg" : ""}">${fmtCur(a.balance, a.currency)}${a.currency !== "UZS" && a.uzs != null ? `<small>≈ ${fmt(a.uzs)} so'm</small>` : ""}</div>
     </div>`).join("") : `<div class="hint">Hisob yo'q — "⚙️ Sozlash"dan qo'shing.</div>`;
 }
-
+ 
 function renderManage(d) {
   const opts = (list, cur, labels) => list.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>${labels ? labels[v] : v}</option>`).join("");
   $("manage").innerHTML = `
@@ -309,7 +309,7 @@ function renderManage(d) {
       <div id="m_new" class="msg"></div>
     </div>`;
 }
-
+ 
 async function saveAcc(id) {
   const m = $("m_" + id);
   m.textContent = "Saqlanmoqda…";
@@ -322,7 +322,7 @@ async function saveAcc(id) {
     load(true);
   } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
-
+ 
 async function addAcc() {
   const m = $("m_new");
   m.textContent = "Qo'shilmoqda…";
@@ -332,12 +332,12 @@ async function addAcc() {
     load(true);
   } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
-
+ 
 async function archAcc(id) {
   if (!confirm("Bu hisobni yashirasizmi? Eski yozuvlar o'chmaydi.")) return;
   try { await api("account_save", { id, archived: true }); load(true); } catch (e) { alert(e.message); }
 }
-
+ 
 async function load(keepManage) {
   try {
     const d = await api("summary");
@@ -350,7 +350,7 @@ async function load(keepManage) {
     if (d.rates && d.rates.USD) { $("rateChip").textContent = "$1 = " + fmt(d.rates.USD) + " so'm"; $("rateChip").classList.remove("hidden"); }
     renderAccounts(d);
     if (keepManage && !$("manage").classList.contains("hidden")) renderManage(d);
-
+ 
     $("cats").innerHTML = d.byCategory.map((c) => {
       const pct = c.limit ? Math.min(100, (c.spent / c.limit) * 100) : 0;
       const over = c.limit && c.spent > c.limit;
@@ -362,7 +362,7 @@ async function load(keepManage) {
         ${c.limit ? `<div class="bar"><i class="${over ? "over" : ""}" style="width:${pct}%"></i></div>` : ""}
       </div>`;
     }).join("");
-
+ 
     $("recent").innerHTML = d.recent.length ? d.recent.map((r) => {
       if (r.kind === "transfer") return `
         <div class="row">
@@ -392,13 +392,13 @@ async function load(keepManage) {
     }
   }
 }
-
+ 
 async function removeRow(kind, id) {
   if (!confirm("Bu yozuvni o'chirasizmi?")) return;
   try { await api("delete", { kind, id }); load(true); }
   catch (e) { alert(e.message); }
 }
-
+ 
 document.addEventListener("click", (ev) => {
   const b = ev.target.closest("button");
   if (!b) return;
@@ -419,8 +419,9 @@ $("sendBtn").onclick = () => send();
 $("photoBtn").onclick = () => $("photoInput").click();
 $("photoInput").onchange = onPhoto;
 $("micBtn").onclick = toggleMic;
-
+ 
 if (password) api("login").then(showApp).catch(() => {});
 </script>
 </body>
 </html>
+ 
