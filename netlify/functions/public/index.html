@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>Moliya</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --line: #334155; --text: #f1f5f9;
+    --muted: #94a3b8; --accent: #22c55e; --red: #f87171; --blue: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 40px; }
+  h1 { font-size: 22px; margin: 8px 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  textarea, input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; font: inherit; }
+  textarea { min-height: 84px; resize: vertical; }
+  button { background: var(--accent); color: #052e16; border: 0; border-radius: 10px;
+    padding: 12px 16px; font: inherit; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; }
+  button:disabled { opacity: .5; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .msg { margin-top: 10px; font-size: 14px; }
+  .ok { color: var(--accent); } .err { color: var(--red); }
+  .totals { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center; }
+  .totals b { display: block; font-size: 17px; }
+  .totals span { color: var(--muted); font-size: 12px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .row:first-child { border-top: 0; }
+  .row small { color: var(--muted); display: block; }
+  .amt { white-space: nowrap; font-weight: 600; }
+  .inc { color: var(--accent); } .exp { color: var(--text); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--blue); }
+  .bar i.over { background: var(--red); }
+  .del { background: none; color: var(--muted); width: auto; padding: 0 0 0 8px; margin: 0; font-size: 18px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>💰 Moliya</h1>
+
+  <div id="login" class="card">
+    <input id="pw" type="password" placeholder="Parol" autocomplete="current-password">
+    <button id="loginBtn">Kirish</button>
+    <div id="loginMsg" class="msg"></div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <textarea id="text" placeholder="Masalan: Kecha Jarvis reklamasiga 300 ming kartadan, bugun taksiga 50 ming naqd"></textarea>
+      <button id="sendBtn">Yozish</button>
+      <div class="hint">Bir xabarda bir nechta xarajat yoki daromad yozsa bo'ladi.</div>
+      <div id="sendMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2 id="monthTitle">Shu oy</h2>
+      <div class="totals">
+        <div><b id="tInc">0</b><span>Daromad</span></div>
+        <div><b id="tExp">0</b><span>Xarajat</span></div>
+        <div><b id="tBal">0</b><span>Qoldiq</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Kategoriyalar</h2>
+      <div id="cats"></div>
+    </div>
+
+    <div class="card">
+      <h2>Oxirgi yozuvlar</h2>
+      <div id="recent"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let password = "";
+try { password = sessionStorage.getItem("pw") || ""; } catch {}
+
+const fmt = (n) => Math.round(n).toLocaleString("ru-RU").replace(/,/g, " ");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(action, extra = {}) {
+  const res = await fetch("/api", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, password, ...extra }),
+  });
+  const data = await res.json().catch(() => ({ error: "Server javob bermadi" }));
+  if (!res.ok) throw new Error(data.error || "Xato");
+  return data;
+}
+
+async function login() {
+  password = $("pw").value.trim();
+  $("loginMsg").textContent = "";
+  try {
+    await api("login");
+    try { sessionStorage.setItem("pw", password); } catch {}
+    showApp();
+  } catch (e) {
+    $("loginMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+function showApp() {
+  $("login").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  load();
+}
+
+async function send() {
+  const text = $("text").value.trim();
+  if (!text) return;
+  $("sendBtn").disabled = true;
+  $("sendMsg").textContent = "AI tahlil qilmoqda…";
+  try {
+    const r = await api("add", { text });
+    if (r.saved.length) {
+      $("sendMsg").innerHTML = r.saved.map((s) =>
+        `<div class="ok">✓ ${s.kind === "income" ? "Daromad" : esc(s.category)} — ${fmt(s.amount)} so'm, ${esc(s.note)} (${s.date})</div>`
+      ).join("");
+      $("text").value = "";
+      load();
+    } else {
+      $("sendMsg").innerHTML = `<span class="err">${esc(r.question)}</span>`;
+    }
+  } catch (e) {
+    $("sendMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  } finally {
+    $("sendBtn").disabled = false;
+  }
+}
+
+async function load() {
+  try {
+    const d = await api("summary");
+    $("monthTitle").textContent = `Shu oy (${d.month})`;
+    $("tInc").textContent = fmt(d.totalIncome);
+    $("tExp").textContent = fmt(d.totalExpense);
+    $("tBal").textContent = fmt(d.totalIncome - d.totalExpense);
+
+    $("cats").innerHTML = d.byCategory.map((c) => {
+      const pct = c.limit ? Math.min(100, (c.spent / c.limit) * 100) : 0;
+      const over = c.limit && c.spent > c.limit;
+      return `<div class="row" style="display:block">
+        <div style="display:flex;justify-content:space-between">
+          <span>${esc(c.name)}</span>
+          <span class="amt">${fmt(c.spent)}${c.limit ? " / " + fmt(c.limit) : ""}</span>
+        </div>
+        ${c.limit ? `<div class="bar"><i class="${over ? "over" : ""}" style="width:${pct}%"></i></div>` : ""}
+      </div>`;
+    }).join("");
+
+    $("recent").innerHTML = d.recent.length ? d.recent.map((r) => `
+      <div class="row">
+        <div>${esc(r.note || (r.kind === "income" ? "Daromad" : r.category))}
+          <small>${r.date} · ${r.kind === "income" ? "Daromad" : esc(r.category)}${r.project ? " · " + esc(r.project) : ""}${r.payment_type ? " · " + r.payment_type : ""}</small>
+        </div>
+        <div style="display:flex;align-items:center">
+          <span class="amt ${r.kind === "income" ? "inc" : "exp"}">${r.kind === "income" ? "+" : "−"}${fmt(r.amount)}</span>
+          <button class="del" title="O'chirish" onclick="removeRow('${r.kind}', ${r.id})">×</button>
+        </div>
+      </div>`).join("") : `<div class="hint">Hozircha yozuv yo'q</div>`;
+  } catch (e) {
+    if (/Parol/.test(e.message)) {
+      try { sessionStorage.removeItem("pw"); } catch {}
+      location.reload();
+    }
+  }
+}
+
+async function removeRow(kind, id) {
+  if (!confirm("Bu yozuvni o'chirasizmi?")) return;
+  try { await api("delete", { kind, id }); load(); }
+  catch (e) { alert(e.message); }
+}
+
+$("loginBtn").onclick = login;
+$("pw").addEventListener("keydown", (e) => e.key === "Enter" && login());
+$("sendBtn").onclick = send;
+
+if (password) api("login").then(showApp).catch(() => {});
+</script>
+</body>
+</html>
