@@ -1,4 +1,4 @@
-// Finance bot — server funksiya (Netlify Functions) — v2 (1-bosqich: hisoblar va valyuta)
+// Finance bot — server funksiya (Netlify Functions) — v3 (1-bosqich: hisoblar va valyuta; 2-bosqich: chek rasmi va ovoz)
 // Vazifasi: matnni AI (Gemini) orqali tahlil qiladi va Supabase bazaga yozadi.
 // Kerakli sozlamalar (Netlify → Environment variables):
 //   SUPABASE_URL, SUPABASE_SECRET, GEMINI_API_KEY, APP_PASSWORD
@@ -11,7 +11,11 @@ const ACCOUNT_KINDS = ["naqd", "karta", "bank"];
 // Avval tez va kam band modellar, keyin kuchliroqlari
 const FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.8-flash"];
 // Netlify funksiyasi ~10 soniyada uziladi, shuning uchun AI'ga jami 8 soniya beramiz
-const AI_TIME_BUDGET_MS = 8000;
+const AI_TIME_BUDGET_MS = 8500;
+// Rasm/ovoz hajmi chegarasi (base64) — Netlify so'rov chegarasi 6 MB
+const MAX_MEDIA_B64 = 4_500_000;
+const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const AUDIO_TYPES = ["audio/wav", "audio/mp3", "audio/mpeg", "audio/ogg", "audio/aac", "audio/flac", "audio/webm", "audio/mp4"];
 
 function checkCategories(categories) {
   if (!categories.length) {
@@ -144,7 +148,7 @@ function formatTransfer(t, accounts) {
 
 // ---------- AI tahlil (Gemini) ----------
 
-async function parseWithAI(message, categoryNames, projectNames, accounts, today) {
+async function parseWithAI(message, categoryNames, projectNames, accounts, today, media = null) {
   const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
   const accList = accounts.map((a) => `${a.name} (${a.currency}, ${a.kind})`);
 
@@ -162,12 +166,22 @@ Rules:
 - "project" must be exactly one of: ${JSON.stringify(projectNames)}, or null if not mentioned.
 - "payment_type": "naqd" (cash), "karta" (card, Click, Payme, Uzum), "otkazma" (bank transfer), or null if unknown.
 - "note": a short description in Uzbek Latin, e.g. "Instagram target", "Taksi", "Kartadan naqd yechildi".
-- If the message contains no amount at all, return an empty "items" array and a short clarifying question in Uzbek in "question".
+- If neither the message nor the attached image/audio contains an amount, return an empty "items" array and a short clarifying question in Uzbek in "question".
+${media && media.kind === "image" ? `
+AN IMAGE IS ATTACHED. It is usually a shop receipt (chek), a bank/Click/Payme/Uzum app screenshot or a card SMS screenshot.
+- Record the TOTAL paid amount ("Итого", "Jami", "Всего", "Summa", "К оплате") as ONE expense, not every line — unless the image clearly shows several separate payments (e.g. a list of card transactions), then one item per payment.
+- "note": the shop / merchant / recipient name and 1–3 words about what was bought (Uzbek Latin), e.g. "Korzinka — oziq-ovqat".
+- Date from the image if visible (and not in the future), otherwise today. Card or cash: from the image if visible (karta, naqd, "Uzcard", "Humo", "Visa"); bank app screenshots mean karta.
+- Incoming transfers / salary credited on the screenshot are "income".
+- Choose the category from the shop type (supermarket/cafe → food-like category, taxi/fuel → transport, etc.).
+- If the image is not financial or unreadable — empty "items" and a short question in Uzbek. Never invent amounts.
+- The typed message (if any) adds context and has priority (e.g. "Jarvis loyihasi uchun", "Humo kartadan").` : ""}${media && media.kind === "audio" ? `
+AN AUDIO (voice message) IS ATTACHED, usually in Uzbek (may mix Russian/English words). First write exactly what was said into "transcript" (Uzbek Latin script), then extract transactions from it using the rules above. If nothing is said or it is not about money — empty "items" and a short question in Uzbek.` : ""}
 
-Message: """${message}"""`;
+Message: """${message || (media ? "(rasm yoki ovozga qarang)" : "")}"""`;
 
   const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    contents: [{ role: "user", parts: [{ text: prompt }, ...(media ? [{ inline_data: { mime_type: media.mime, data: media.data } }] : [])] }],
     generationConfig: {
       temperature: 0,
       responseMimeType: "application/json",
@@ -195,6 +209,7 @@ Message: """${message}"""`;
             },
           },
           question: { type: "STRING", nullable: true },
+          transcript: { type: "STRING", nullable: true },
         },
         required: ["items"],
       },
@@ -214,7 +229,7 @@ Message: """${message}"""`;
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY || "" },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.min(remaining, 6000)),
+        signal: AbortSignal.timeout(media ? remaining : Math.min(remaining, 6000)),
       });
       const payload = await res.json().catch(() => ({}));
       if (res.ok) {
@@ -251,9 +266,22 @@ function pickAccount(accounts, name, currency, paymentType) {
 
 // ---------- Amallar ----------
 
-async function addFromText(rawText) {
+function checkMedia(b) {
+  const m = b && (b.image || b.audio);
+  if (!m) return null;
+  const kind = b.image ? "image" : "audio";
+  const mime = String(m.mime || "").toLowerCase().split(";")[0];
+  const data = String(m.data || "").replace(/^data:[^,]+,/, "");
+  if (!data) throw new Error(kind === "image" ? "Rasm bo'sh" : "Ovoz bo'sh");
+  if (data.length > MAX_MEDIA_B64) throw new Error(kind === "image" ? "Rasm juda katta — kichikroq rasm yuboring" : "Ovoz juda uzun — 1 daqiqagacha gapiring");
+  if (kind === "image" && !IMAGE_TYPES.includes(mime)) throw new Error("Rasm turi: JPG, PNG yoki WEBP");
+  if (kind === "audio" && !AUDIO_TYPES.includes(mime)) throw new Error("Ovoz turi qo'llab-quvvatlanmaydi: " + mime);
+  return { kind, mime, data };
+}
+
+async function addFromText(rawText, media = null) {
   const text = String(rawText || "").trim().slice(0, 2000);
-  if (!text) throw new Error("Matn bo'sh");
+  if (!text && !media) throw new Error("Matn bo'sh");
 
   const today = tashkentToday();
   const [categories, projects, accounts] = await Promise.all([
@@ -264,11 +292,12 @@ async function addFromText(rawText) {
   checkCategories(categories);
   // Kursni AI bilan bir vaqtda olamiz (vaqtni tejash uchun)
   const ratesP = getRates(today).catch(() => ({ UZS: 1 }));
-  const ai = await parseWithAI(text, categories.map((c) => c.name), projects.map((p) => p.name), accounts.filter((a) => !a.archived), today);
+  const ai = await parseWithAI(text, categories.map((c) => c.name), projects.map((p) => p.name), accounts.filter((a) => !a.archived), today, media);
   const rates = await ratesP;
+  const transcript = media && media.kind === "audio" ? String(ai.transcript || "").trim().slice(0, 1000) : null;
 
   const items = Array.isArray(ai.items) ? ai.items : [];
-  if (!items.length) return { saved: [], question: ai.question || "Summani topa olmadim. Aniqroq yozing." };
+  if (!items.length) return { saved: [], transcript, question: ai.question || (media && media.kind === "image" ? "Rasmda summani topa olmadim. Aniqroq rasm yuboring yoki summani yozing." : "Summani topa olmadim. Aniqroq yozing.") };
 
   const fallbackCat = categories.find((c) => c.name === "Boshqa");
   const categoryId = (name) => (categories.find((c) => same(c.name, name)) || fallbackCat)?.id ?? null;
@@ -320,7 +349,7 @@ async function addFromText(rawText) {
     transfers.length ? post("transfers", transfers, "id,date,from_account,to_account,amount,to_amount,note") : [],
   ]);
   saved.push(...e.map((r) => formatRow(r, "expense", accounts)), ...i.map((r) => formatRow(r, "income", accounts)), ...t.map((r) => formatTransfer(r, accounts)));
-  return { saved, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
+  return { saved, transcript, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
 }
 
 // Hisoblar qoldig'i: boshlang'ich + daromad − xarajat − chiqqan o'tkazma + kelgan o'tkazma
@@ -472,7 +501,7 @@ export default async (req) => {
       case "login":
         return json({ ok: true });
       case "add":
-        return json(await addFromText(body.text));
+        return json(await addFromText(body.text, checkMedia(body)));
       case "summary":
         return json(await summary());
       case "delete":
