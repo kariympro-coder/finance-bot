@@ -5,7 +5,10 @@
 //   GEMINI_MODEL (ixtiyoriy, standart: gemini-flash-latest)
 
 const PAYMENT_TYPES = ["naqd", "karta", "otkazma"];
-const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+// Avval tez va kam band modellar, keyin kuchliroqlari
+const FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.8-flash"];
+// Netlify funksiyasi ~10 soniyada uziladi, shuning uchun AI'ga jami 8.5 soniya beramiz
+const AI_TIME_BUDGET_MS = 8500;
 
 function checkCategories(categories) {
   if (!categories.length) {
@@ -119,30 +122,40 @@ Message: """${message}"""`;
 
   // Model band (503/429) yoki mavjud bo'lmasa (404), keyingi modelga o'tadi
   const models = [...new Set([model, ...FALLBACK_MODELS])];
+  const deadline = Date.now() + AI_TIME_BUDGET_MS;
   let data = null;
   let lastError = "";
   for (let i = 0; i < models.length && !data; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, 800));
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": process.env.GEMINI_API_KEY || "",
-        },
-        body: JSON.stringify(body),
+    const remaining = deadline - Date.now();
+    if (remaining < 1500) break;
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": process.env.GEMINI_API_KEY || "",
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(Math.min(remaining, 6000)),
+        }
+      );
+      const payload = await res.json().catch(() => ({}));
+      if (res.ok) {
+        data = payload;
+      } else {
+        const msg = payload.error?.message || "noma'lum";
+        lastError = `AI xatosi (${res.status}, ${models[i]}): ${msg}`;
+        // Kalit xato bo'lsa, boshqa model ham yordam bermaydi
+        if (res.status === 401 || res.status === 403 || /API key/i.test(msg)) throw new Error(lastError);
       }
-    );
-    const payload = await res.json().catch(() => ({}));
-    if (res.ok) {
-      data = payload;
-    } else {
-      lastError = `AI xatosi (${res.status}, ${models[i]}): ${payload.error?.message || "noma'lum"}`;
-      if (![404, 429, 500, 503].includes(res.status)) throw new Error(lastError);
+    } catch (err) {
+      if (/API key|401|403/.test(err.message)) throw err;
+      lastError = `AI javob bermadi (${models[i]})`;
     }
   }
-  if (!data) throw new Error(lastError + " — bir daqiqadan keyin qayta urinib ko'ring.");
+  if (!data) throw new Error((lastError || "AI band") + " — 1 daqiqadan keyin qayta urinib ko'ring.");
   const text = (data.candidates?.[0]?.content?.parts || [])
     .filter((p) => p.text && !p.thought)
     .map((p) => p.text)
