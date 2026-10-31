@@ -1,4 +1,4 @@
-// Finance bot — server funksiya (Netlify Functions) — v4 (1: hisoblar va valyuta; 2: chek rasmi va ovoz; 3: grafiklar, budjet limiti, loyiha foydasi)
+// Finance bot — server funksiya (Netlify Functions) — v5 (1: hisoblar va valyuta; 2: chek rasmi va ovoz; 3: grafiklar, budjet limiti, loyiha foydasi; 4: AI maslahatchi, haftalik xulosa, g'alati xarajat)
 // Vazifasi: matnni AI (Gemini) orqali tahlil qiladi va Supabase bazaga yozadi.
 // Kerakli sozlamalar (Netlify → Environment variables):
 //   SUPABASE_URL, SUPABASE_SECRET, GEMINI_API_KEY, APP_PASSWORD
@@ -146,10 +146,44 @@ function formatTransfer(t, accounts) {
   };
 }
  
-// ---------- AI tahlil (Gemini) ----------
+// ---------- AI (Gemini) ----------
+ 
+// Gemini'ga so'rov: model band (503/429) yoki mavjud bo'lmasa (404) — keyingi modelga o'tadi. Matn qaytaradi.
+async function callGemini(body, long = false) {
+  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const models = [...new Set([model, ...FALLBACK_MODELS])];
+  const deadline = Date.now() + AI_TIME_BUDGET_MS;
+  let data = null;
+  let lastError = "";
+  for (let i = 0; i < models.length && !data; i++) {
+    const remaining = deadline - Date.now();
+    if (remaining < 1500) break;
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY || "" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(long ? remaining : Math.min(remaining, 6000)),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (res.ok) {
+        data = payload;
+      } else {
+        const msg = payload.error?.message || "noma'lum";
+        lastError = `AI xatosi (${res.status}, ${models[i]}): ${msg}`;
+        // Kalit xato bo'lsa, boshqa model ham yordam bermaydi
+        if (res.status === 401 || res.status === 403 || /API key/i.test(msg)) throw new Error(lastError);
+      }
+    } catch (err) {
+      if (/API key|401|403/.test(err.message)) throw err;
+      lastError = `AI javob bermadi (${models[i]})`;
+    }
+  }
+  if (!data) throw new Error((lastError || "AI band") + " — 1 daqiqadan keyin qayta urinib ko'ring.");
+  return (data.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+}
  
 async function parseWithAI(message, categoryNames, projectNames, accounts, today, media = null) {
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
   const accList = accounts.map((a) => `${a.name} (${a.currency}, ${a.kind})`);
  
   const prompt = `You extract financial transactions from a short message written in Uzbek (Latin or Cyrillic), Russian or English.
@@ -216,37 +250,7 @@ Message: """${message || (media ? "(rasm yoki ovozga qarang)" : "")}"""`;
     },
   };
  
-  // Model band (503/429) yoki mavjud bo'lmasa (404), keyingi modelga o'tadi
-  const models = [...new Set([model, ...FALLBACK_MODELS])];
-  const deadline = Date.now() + AI_TIME_BUDGET_MS;
-  let data = null;
-  let lastError = "";
-  for (let i = 0; i < models.length && !data; i++) {
-    const remaining = deadline - Date.now();
-    if (remaining < 1500) break;
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY || "" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(media ? remaining : Math.min(remaining, 6000)),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (res.ok) {
-        data = payload;
-      } else {
-        const msg = payload.error?.message || "noma'lum";
-        lastError = `AI xatosi (${res.status}, ${models[i]}): ${msg}`;
-        // Kalit xato bo'lsa, boshqa model ham yordam bermaydi
-        if (res.status === 401 || res.status === 403 || /API key/i.test(msg)) throw new Error(lastError);
-      }
-    } catch (err) {
-      if (/API key|401|403/.test(err.message)) throw err;
-      lastError = `AI javob bermadi (${models[i]})`;
-    }
-  }
-  if (!data) throw new Error((lastError || "AI band") + " — 1 daqiqadan keyin qayta urinib ko'ring.");
-  const text = (data.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+  const text = await callGemini(body, !!media);
   try {
     return JSON.parse(text);
   } catch {
@@ -360,7 +364,15 @@ async function addFromText(rawText, media = null) {
       alerts = budgetAlerts(limited.map((c) => ({ name: c.name, limit: num(c.monthly_limit), spent: Math.round(rows.filter((x) => x.category_id === c.id).reduce((s2, x) => s2 + uzsOf(x), 0)) })));
     }
   } catch {}
-  return { saved, transcript, alerts, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
+  // G'alati xarajat: odatdagidan ancha katta summa
+  let unusualList = [];
+  try {
+    if (e.length) {
+      const hist = (await loadHistory(addDays(today, -120))).ex;
+      unusualList = e.map((row) => unusual({ id: row.id, date: row.date, uzs: Math.round(uzsOf(row)), cat: row.categories?.name || "Boshqa", note: row.note || "" }, hist)).filter(Boolean);
+    }
+  } catch {}
+  return { saved, transcript, alerts, unusual: unusualList, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
 }
  
 // Hisoblar qoldig'i: boshlang'ich + daromad − xarajat − chiqqan o'tkazma + kelgan o'tkazma
@@ -485,6 +497,98 @@ async function summary(monthParam) {
   };
 }
  
+// ---------- 4-bosqich: AI maslahatchi, haftalik xulosa, g'alati xarajat ----------
+ 
+function addDays(d, k) {
+  const t = new Date(d + "T00:00:00Z");
+  t.setUTCDate(t.getUTCDate() + k);
+  return t.toISOString().slice(0, 10);
+}
+const median = (arr) => { if (!arr.length) return 0; const a = [...arr].sort((x, y) => x - y), m = Math.floor(a.length / 2); return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+ 
+// G'alati xarajat: shu kategoriyadagi odatiy (median) summadan 3 baravar katta va kamida 200 ming so'm
+function unusual(exp, history) {
+  const prior = history.filter((h) => h.cat === exp.cat && h.id !== exp.id).map((h) => h.uzs);
+  if (prior.length < 4) return null;
+  const med = median(prior);
+  if (exp.uzs >= Math.max(med * 3, 200000)) return { ...exp, median: Math.round(med), times: Math.round((exp.uzs / med) * 10) / 10 };
+  return null;
+}
+ 
+async function loadHistory(fromDate) {
+  const [ex, inc] = await Promise.all([
+    sb(`expenses?select=id,date,amount,rate,note,categories(name),projects(name)&date=gte.${fromDate}&order=date.desc,id.desc`),
+    sb(`incomes?select=id,date,amount,rate,source,projects(name)&date=gte.${fromDate}&order=date.desc,id.desc`),
+  ]);
+  return {
+    ex: ex.map((e) => ({ id: e.id, date: e.date, uzs: Math.round(uzsOf(e)), cat: e.categories?.name || "Boshqa", project: e.projects?.name || null, note: e.note || "" })),
+    inc: inc.map((e) => ({ id: e.id, date: e.date, uzs: Math.round(uzsOf(e)), project: e.projects?.name || null, note: e.source || "" })),
+  };
+}
+ 
+// Haftalik xulosa (AI'siz, tez): oxirgi 7 kun va undan oldingi 7 kun
+async function insights() {
+  const today = tashkentToday();
+  const { ex, inc } = await loadHistory(addDays(today, -120));
+  const w1 = addDays(today, -6), w0 = addDays(today, -13);
+  const thisW = ex.filter((e) => e.date >= w1), prevW = ex.filter((e) => e.date >= w0 && e.date < w1);
+  const sum = (a) => a.reduce((s2, x) => s2 + x.uzs, 0);
+  const byCat = (a) => a.reduce((m, x) => ((m[x.cat] = (m[x.cat] || 0) + x.uzs), m), {});
+  const c1 = byCat(thisW), c0 = byCat(prevW);
+  const cats = [...new Set([...Object.keys(c1), ...Object.keys(c0)])]
+    .map((name) => ({ name, now: c1[name] || 0, before: c0[name] || 0, diff: (c1[name] || 0) - (c0[name] || 0) }))
+    .sort((a, b) => b.now - a.now);
+  const anomalies = ex.filter((e) => e.date >= addDays(today, -30)).map((e) => unusual(e, ex)).filter(Boolean).slice(0, 5);
+  return {
+    from: w1, to: today,
+    expense: sum(thisW), expensePrev: sum(prevW),
+    income: sum(inc.filter((e) => e.date >= w1)),
+    topCats: cats.slice(0, 5),
+    biggest: [...thisW].sort((a, b) => b.uzs - a.uzs).slice(0, 3),
+    anomalies,
+    count: thisW.length,
+  };
+}
+ 
+// AI maslahatchi: savolga egasining haqiqiy ma'lumotlari asosida javob
+async function ask(question) {
+  const q = String(question || "").trim().slice(0, 500);
+  if (!q) throw new Error("Savol yozing");
+  const today = tashkentToday();
+  const from = monthRange(addMonths(today.slice(0, 7), -2))[0];
+  const [{ ex, inc }, categories, accounts, rates] = await Promise.all([
+    loadHistory(from),
+    sb("categories?select=name,monthly_limit&order=name"),
+    sb("accounts?select=id,name,currency,kind,opening_balance,archived&order=id"),
+    getRates(today).catch(() => ({ UZS: 1 })),
+  ]);
+  const bal = await accountBalances(accounts);
+  const monthsData = {};
+  for (const e of ex) { const m = (monthsData[e.date.slice(0, 7)] ||= { xarajat: 0, daromad: 0, kategoriyalar: {}, loyihalar: {} }); m.xarajat += e.uzs; m.kategoriyalar[e.cat] = (m.kategoriyalar[e.cat] || 0) + e.uzs; if (e.project) { const pr = (m.loyihalar[e.project] ||= { daromad: 0, xarajat: 0 }); pr.xarajat += e.uzs; } }
+  for (const e of inc) { const m = (monthsData[e.date.slice(0, 7)] ||= { xarajat: 0, daromad: 0, kategoriyalar: {}, loyihalar: {} }); m.daromad += e.uzs; if (e.project) { const pr = (m.loyihalar[e.project] ||= { daromad: 0, xarajat: 0 }); pr.daromad += e.uzs; } }
+  const data = {
+    bugun: today,
+    oylar: monthsData,
+    limitlar: Object.fromEntries(categories.filter((c) => num(c.monthly_limit) > 0).map((c) => [c.name, num(c.monthly_limit)])),
+    hisoblar: accounts.filter((a) => !a.archived).map((a) => ({ nom: a.name, valyuta: a.currency, qoldiq: round2(bal[a.id]) })),
+    dollar_kursi: rates.USD || null,
+    shu_oy_yozuvlari: ex.filter((e) => e.date.slice(0, 7) === today.slice(0, 7)).slice(0, 80).map((e) => [e.date.slice(5), e.uzs, e.cat, e.note.slice(0, 40), e.project || ""]),
+    shu_oy_daromadlari: inc.filter((e) => e.date.slice(0, 7) === today.slice(0, 7)).slice(0, 30).map((e) => [e.date.slice(5), e.uzs, e.note.slice(0, 40), e.project || ""]),
+  };
+  const prompt = `Sen — egasining shaxsiy va biznes moliya bo'yicha yordamchisisan. Egasi tadbirkor (AI agentlar va Jarvis mahsulotini sotadi).
+Faqat quyidagi HAQIQIY ma'lumotlar asosida o'zbek tilida (lotin), "siz"lab, qisqa javob ber: 3–8 gap yoki qisqa ro'yxat. Raqamlarni so'mda, bo'shliq bilan yoz (1 250 000).
+Ma'lumotda yo'q narsani to'qima; yetarli bo'lmasa — shuni ochiq ayt va nimani yozib borish kerakligini ayt. Taqqoslash so'ralsa — oylarni solishtir. Kerak bo'lsa 1–3 ta aniq, amaliy maslahat ber (qayerda tejash, qaysi limitni qo'yish).
+Investitsiya, kredit, soliq bo'yicha qat'iy tavsiya berma — faqat raqamlarni tushuntir va mutaxassisga murojaat qilishni eslat.
+Markdown ishlatma (yulduzcha, #), oddiy matn; ro'yxat kerak bo'lsa "• " bilan.
+"shu_oy_yozuvlari" formati: [oy-kun, summa_so'm, kategoriya, izoh, loyiha].
+ 
+MA'LUMOTLAR (JSON): ${JSON.stringify(data)}
+ 
+SAVOL: ${q}`;
+  const text = await callGemini({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 900 } }, true);
+  return { answer: text.replace(/\*\*/g, "").replace(/^#+\s*/gm, "").trim() || "Javob tayyorlay olmadim, qayta urinib ko'ring." };
+}
+ 
 // Kategoriya limiti (0 — limitsiz)
 async function setLimit(b) {
   const id = parseInt(b.id, 10);
@@ -598,6 +702,10 @@ export default async (req) => {
         return json(await addFromText(body.text, checkMedia(body)));
       case "summary":
         return json(await summary(body.month));
+      case "ask":
+        return json(await ask(body.question));
+      case "insights":
+        return json(await insights());
       case "set_limit":
         return json(await setLimit(body));
       case "category_add":
