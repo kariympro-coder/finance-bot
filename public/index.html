@@ -74,6 +74,14 @@
   .profit { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
   .addline { display: flex; gap: 8px; margin-top: 10px; }
   .addline input { padding: 8px 10px; flex: 1; min-width: 0; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chips button { width: auto; margin: 0; padding: 6px 10px; font-size: 13px; font-weight: 500; background: var(--bg); color: var(--blue); border: 1px solid var(--line); border-radius: 999px; }
+  .answer { white-space: pre-wrap; margin-top: 10px; font-size: 15px; line-height: 1.5; }
+  .answer .q { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+  .wk { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; text-align: center; margin-bottom: 8px; }
+  .wk b { display: block; font-size: 16px; }
+  .wk span { color: var(--muted); font-size: 12px; }
+  .up, .row small.up { color: var(--red); } .down, .row small.down { color: var(--accent); }
   .addline button { width: auto; margin: 0; padding: 8px 12px; white-space: nowrap; background: var(--bg); color: var(--blue); border: 1px solid var(--line); }
 </style>
 </head>
@@ -110,6 +118,23 @@
     </div>
  
     <div id="alerts"></div>
+ 
+    <div class="card">
+      <h2>🤖 AI maslahatchi</h2>
+      <div class="addline" style="margin-top:0"><input id="askInput" placeholder="Savol bering: bu oy nimaga ko'p ketdi?"><button id="askBtn">So'rash</button></div>
+      <div class="chips">
+        <button data-q="Bu oy pulim asosan nimaga ketdi? O'tgan oy bilan solishtir.">Bu oy nimaga ketdi?</button>
+        <button data-q="Qayerda tejasam bo'ladi? 3 ta aniq maslahat ber.">Qayerda tejayman?</button>
+        <button data-q="Loyihalarim foydadami? Har biri bo'yicha qisqa xulosa.">Loyihalar foydasi</button>
+        <button data-q="Shu tezlikda oy oxirida qancha pulim qoladi?">Oy oxiriga prognoz</button>
+      </div>
+      <div id="answer" class="answer"></div>
+    </div>
+ 
+    <div class="card">
+      <h2>📅 Haftalik xulosa <span class="hint" style="margin:0" id="wkRange"></span></h2>
+      <div id="weekly"><div class="hint">Yuklanmoqda…</div></div>
+    </div>
  
     <div class="card">
       <div class="mnav"><button id="prevM">‹</button><b id="monthTitle">Shu oy</b><button id="nextM">›</button></div>
@@ -196,6 +221,35 @@ function renderCats(d) {
     </div>`;
   }).join("");
 }
+async function askAI(q) {
+  q = (q || $("askInput").value).trim();
+  if (!q) return;
+  $("askInput").value = "";
+  $("askBtn").disabled = true;
+  $("answer").innerHTML = `<div class="q">❓ ${esc(q)}</div><div class="hint">AI ma'lumotlaringizni tahlil qilmoqda…</div>`;
+  try {
+    const r = await api("ask", { question: q });
+    $("answer").innerHTML = `<div class="q">❓ ${esc(q)}</div>${esc(r.answer)}`;
+  } catch (e) { $("answer").innerHTML = `<div class="q">❓ ${esc(q)}</div><span class="err">${esc(e.message)}</span>`; }
+  finally { $("askBtn").disabled = false; }
+}
+ 
+async function loadWeekly() {
+  try {
+    const w = await api("insights");
+    const diff = w.expense - w.expensePrev, pct = w.expensePrev ? Math.round((diff / w.expensePrev) * 100) : null;
+    $("wkRange").textContent = w.from.slice(5).replace("-", ".") + " – " + w.to.slice(5).replace("-", ".");
+    let h = `<div class="wk">
+      <div><b>${fmt(w.expense)}</b><span>Xarajat (7 kun)</span></div>
+      <div><b class="${diff > 0 ? "up" : diff < 0 ? "down" : ""}">${pct == null ? "—" : (diff > 0 ? "▲ " : diff < 0 ? "▼ " : "") + Math.abs(pct) + "%"}</b><span>O'tgan haftaga nisbatan</span></div>
+      <div><b class="inc">${fmt(w.income)}</b><span>Daromad</span></div></div>`;
+    if (w.topCats.length) h += w.topCats.map((c) => `<div class="row"><span>${esc(c.name)}</span><span class="amt">${fmt(c.now)}${c.before || c.now ? `<small class="${c.diff > 0 ? "up" : c.diff < 0 ? "down" : ""}">${c.diff > 0 ? "+" : ""}${fmt(c.diff)}</small>` : ""}</span></div>`).join("");
+    else h += `<div class="hint">Bu hafta xarajat yozilmagan.</div>`;
+    if (w.anomalies.length) h += `<div class="lbl" style="margin-top:10px">⚠️ Odatdagidan katta xarajatlar (30 kun)</div>` + w.anomalies.map((a) => `<div class="alert">${esc(a.note || a.cat)} — <b>${fmt(a.uzs)}</b> so'm (${a.date.slice(5).replace("-", ".")}). ${esc(a.cat)}da odatda ${fmt(a.median)} so'm — ${a.times}× ko'p.</div>`).join("");
+    $("weekly").innerHTML = h;
+  } catch (e) { $("weekly").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+ 
 async function setLimitFor(id) {
   const v = $("lim_" + id).value;
   try { await api("set_limit", { id, limit: v }); openCat = null; load(true); } catch (e) { alert(e.message); }
@@ -243,6 +297,7 @@ function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   load();
+  loadWeekly();
 }
  
 function savedLine(s) {
@@ -262,10 +317,11 @@ async function send(media) {
     const r = await api("add", { text, ...(media || {}) });
     let h = r.transcript ? `<div class="said">🎤 «${esc(r.transcript)}»</div>` : "";
     h += r.saved.map((s) => `<div class="ok">✓ ${savedLine(s)}</div>`).join("");
+    (r.unusual || []).forEach((u) => { h += `<div class="alert">⚠️ <b>${esc(u.note || u.cat)}</b> — ${fmt(u.uzs)} so'm: ${esc(u.cat)}da odatda ${fmt(u.median)} so'm, bu ${u.times}× ko'p. To'g'rimi?</div>`; });
     (r.alerts || []).forEach((a) => { h += `<div class="alert ${a.over ? "over" : ""}">${a.over ? "🔴" : "🟡"} <b>${esc(a.name)}</b>: ${fmt(a.spent)} / ${fmt(a.limit)} so'm (${a.pct}%)${a.over ? " — limitdan oshdi!" : " — limitga yaqin"}</div>`; });
     if (r.question) h += `<div class="err">${esc(r.question)}</div>`;
     $("sendMsg").innerHTML = h;
-    if (r.saved.length) { $("text").value = ""; load(); }
+    if (r.saved.length) { $("text").value = ""; load(); loadWeekly(); }
   } catch (e) {
     $("sendMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   } finally {
@@ -502,6 +558,8 @@ document.addEventListener("click", (ev) => {
   else if (b.dataset.arch) archAcc(b.dataset.arch);
   else if (b.id === "addAcc") addAcc();
   else if (b.dataset.lim) setLimitFor(b.dataset.lim);
+  else if (b.dataset.q) askAI(b.dataset.q);
+  else if (b.id === "askBtn") askAI();
   else if (b.id === "addCat") addNamed("category_add", "newCat");
   else if (b.id === "addProj") addNamed("project_add", "newProj");
   else if (b.id === "prevM") { viewMonth = shiftMonth(viewMonth, -1); load(); }
@@ -516,6 +574,7 @@ document.addEventListener("click", (ev) => {
 $("loginBtn").onclick = login;
 $("pw").addEventListener("keydown", (e) => e.key === "Enter" && login());
 $("sendBtn").onclick = () => send();
+$("askInput").addEventListener("keydown", (e) => e.key === "Enter" && askAI());
 $("photoBtn").onclick = () => $("photoInput").click();
 $("photoInput").onchange = onPhoto;
 $("micBtn").onclick = toggleMic;
