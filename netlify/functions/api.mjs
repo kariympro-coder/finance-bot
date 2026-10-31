@@ -1,14 +1,17 @@
-// Finance bot — server funksiya (Netlify Functions)
+// Finance bot — server funksiya (Netlify Functions) — v2 (1-bosqich: hisoblar va valyuta)
 // Vazifasi: matnni AI (Gemini) orqali tahlil qiladi va Supabase bazaga yozadi.
 // Kerakli sozlamalar (Netlify → Environment variables):
 //   SUPABASE_URL, SUPABASE_SECRET, GEMINI_API_KEY, APP_PASSWORD
 //   GEMINI_MODEL (ixtiyoriy, standart: gemini-flash-latest)
+// Bazada kerak: 1-bosqich-hisoblar.sql (accounts, transfers, rates jadvallari)
 
 const PAYMENT_TYPES = ["naqd", "karta", "otkazma"];
+const CURRENCIES = ["UZS", "USD", "EUR", "RUB"];
+const ACCOUNT_KINDS = ["naqd", "karta", "bank"];
 // Avval tez va kam band modellar, keyin kuchliroqlari
 const FALLBACK_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.8-flash"];
-// Netlify funksiyasi ~10 soniyada uziladi, shuning uchun AI'ga jami 8.5 soniya beramiz
-const AI_TIME_BUDGET_MS = 8500;
+// Netlify funksiyasi ~10 soniyada uziladi, shuning uchun AI'ga jami 8 soniya beramiz
+const AI_TIME_BUDGET_MS = 8000;
 
 function checkCategories(categories) {
   if (!categories.length) {
@@ -51,40 +54,114 @@ async function sb(path, options = {}) {
     headers: sbHeaders(options.headers),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`Bazaga ulanishda xato (${res.status}): ${text}`);
+  if (!res.ok) {
+    if (/accounts|transfers|rates|account_id|currency/.test(text) && /does not exist|Could not find/i.test(text)) {
+      throw new Error("Bazada hisoblar jadvali yo'q — Supabase SQL Editor'da '1-bosqich-hisoblar.sql' ni ishga tushiring.");
+    }
+    throw new Error(`Bazaga ulanishda xato (${res.status}): ${text}`);
+  }
   return text ? JSON.parse(text) : null;
 }
 
-function formatRow(row, kind) {
+const num = (v) => Number(v) || 0;
+const round2 = (v) => Math.round(num(v) * 100) / 100;
+const same = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+// ---------- Valyuta kursi (Markaziy bank → zaxira manbalar), kuniga bir marta bazaga saqlanadi ----------
+
+async function fetchJson(url, ms) {
+  const r = await fetch(url, { headers: { accept: "application/json", "user-agent": "Mozilla/5.0 (FinanceBot)" }, signal: AbortSignal.timeout(ms) });
+  if (!r.ok) throw new Error(url.split("/")[2] + " " + r.status);
+  return r.json();
+}
+
+async function liveRate(code) {
+  try {
+    const d = (await fetchJson(`https://cbu.uz/uz/arkhiv-kursov-valyut/json/${code}/`, 2500))[0];
+    if (d && d.Rate) return Number(d.Rate) / (Number(d.Nominal) || 1);
+  } catch {}
+  try {
+    const low = code.toLowerCase();
+    const d = await fetchJson(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/${low}.min.json`, 2000);
+    const v = d && d[low] && Number(d[low].uzs);
+    if (v) return v;
+  } catch {}
+  return 0;
+}
+
+// Bugungi kurslar: {USD: 12850, EUR: ..., RUB: ...}. Bazada bo'lmasa — Markaziy bankdan olib saqlaydi.
+async function getRates(today, need = ["USD", "EUR", "RUB"]) {
+  const out = { UZS: 1 };
+  let rows = [];
+  try { rows = (await sb(`rates?select=ccy,date,rate&order=date.desc&limit=30`)) || []; } catch {}
+  for (const c of need) {
+    const todayRow = rows.find((r) => r.ccy === c && r.date === today);
+    if (todayRow) { out[c] = num(todayRow.rate); continue; }
+    const v = await liveRate(c);
+    if (v) {
+      out[c] = v;
+      sb("rates", { method: "POST", headers: { Prefer: "resolution=merge-duplicates" }, body: JSON.stringify([{ ccy: c, date: today, rate: v }]) }).catch(() => {});
+    } else {
+      const last = rows.find((r) => r.ccy === c); // internet ishlamasa — oxirgi saqlangan kurs
+      if (last) out[c] = num(last.rate);
+    }
+  }
+  return out;
+}
+
+function formatRow(row, kind, accounts = []) {
+  const acc = accounts.find((a) => a.id === row.account_id);
   return {
     kind,
     id: row.id,
     date: row.date,
-    amount: Number(row.amount),
+    amount: num(row.amount),
+    currency: row.currency || "UZS",
+    uzs: round2(num(row.amount) * (num(row.rate) || 1)),
     category: row.categories?.name || null,
     project: row.projects?.name || null,
     payment_type: row.payment_type || null,
+    account: acc ? acc.name : null,
     note: row.note || row.source || "",
+  };
+}
+
+function formatTransfer(t, accounts) {
+  const f = accounts.find((a) => a.id === t.from_account), to = accounts.find((a) => a.id === t.to_account);
+  return {
+    kind: "transfer",
+    id: t.id,
+    date: t.date,
+    amount: num(t.amount),
+    currency: f ? f.currency : "UZS",
+    to_amount: num(t.to_amount),
+    to_currency: to ? to.currency : "UZS",
+    from: f ? f.name : "?",
+    to: to ? to.name : "?",
+    note: t.note || "",
   };
 }
 
 // ---------- AI tahlil (Gemini) ----------
 
-async function parseWithAI(message, categoryNames, projectNames, today) {
+async function parseWithAI(message, categoryNames, projectNames, accounts, today) {
   const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  const accList = accounts.map((a) => `${a.name} (${a.currency}, ${a.kind})`);
 
   const prompt = `You extract financial transactions from a short message written in Uzbek (Latin or Cyrillic), Russian or English.
 Today's date is ${today} (Asia/Tashkent timezone).
 
 Rules:
-- Each transaction is either "expense" (money spent) or "income" (money received). One message may contain several transactions.
-- Amounts are in Uzbek so'm (UZS). "50 ming" / "50k" / "50 тысяч" = 50000. "1.5 mln" / "1,5 million" = 1500000.
-- If an amount is in another currency (dollar, $, rubl, etc.), do NOT guess the conversion: return no items and put a short question in Uzbek into "question" asking for the amount in so'm.
+- Each item is "expense" (money spent), "income" (money received) or "transfer" (money moved between the user's OWN accounts: cash withdrawal from card, topping up a card, exchanging dollars to so'm, etc. — a transfer is NOT an expense or income). One message may contain several items.
+- "amount" is a number in the item's own currency. "50 ming" / "50k" / "50 тысяч" = 50000. "1.5 mln" / "1,5 million" = 1500000.
+- "currency": "UZS" (so'm, default), "USD" ($, dollar, доллар), "EUR" (yevro), "RUB" (rubl). Do NOT convert currencies yourself.
+- "account": the user's account the money left (expense/transfer) or arrived to (income), exactly one of: ${JSON.stringify(accList.map((x) => x.replace(/ \(.*$/, "")))}. Details: ${JSON.stringify(accList)}. Match by name or by hint ("kartadan" → a karta account of that currency, "naqd" → a naqd account, "$" → a USD account). If unclear, null.
+- For "transfer": "account" = from account, "to_account" = destination account (same list). "to_amount" = amount that arrived, only if the message says it (e.g. "100$ ni 1 280 000 so'mga almashtirdim" → amount 100 USD, to_amount 1280000); otherwise null.
 - Dates: resolve relative words ("bugun", "kecha", "o'tgan dushanba", "3-noyabr") to YYYY-MM-DD. If no date is given, use today.
-- "category" for expenses must be exactly one of: ${JSON.stringify(categoryNames)}. If nothing fits, use "Boshqa".
+- "category" (expenses only) must be exactly one of: ${JSON.stringify(categoryNames)}. If nothing fits, use "Boshqa".
 - "project" must be exactly one of: ${JSON.stringify(projectNames)}, or null if not mentioned.
 - "payment_type": "naqd" (cash), "karta" (card, Click, Payme, Uzum), "otkazma" (bank transfer), or null if unknown.
-- "note": a short description in Uzbek Latin, e.g. "Instagram target", "Taksi".
+- "note": a short description in Uzbek Latin, e.g. "Instagram target", "Taksi", "Kartadan naqd yechildi".
 - If the message contains no amount at all, return an empty "items" array and a short clarifying question in Uzbek in "question".
 
 Message: """${message}"""`;
@@ -102,15 +179,19 @@ Message: """${message}"""`;
             items: {
               type: "OBJECT",
               properties: {
-                type: { type: "STRING", enum: ["expense", "income"] },
+                type: { type: "STRING", enum: ["expense", "income", "transfer"] },
                 date: { type: "STRING" },
                 amount: { type: "NUMBER" },
+                currency: { type: "STRING", enum: CURRENCIES },
+                account: { type: "STRING", nullable: true },
+                to_account: { type: "STRING", nullable: true },
+                to_amount: { type: "NUMBER", nullable: true },
                 category: { type: "STRING", nullable: true },
                 project: { type: "STRING", nullable: true },
                 payment_type: { type: "STRING", nullable: true },
                 note: { type: "STRING" },
               },
-              required: ["type", "date", "amount", "note"],
+              required: ["type", "date", "amount", "currency", "note"],
             },
           },
           question: { type: "STRING", nullable: true },
@@ -129,18 +210,12 @@ Message: """${message}"""`;
     const remaining = deadline - Date.now();
     if (remaining < 1500) break;
     try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": process.env.GEMINI_API_KEY || "",
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(Math.min(remaining, 6000)),
-        }
-      );
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY || "" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Math.min(remaining, 6000)),
+      });
       const payload = await res.json().catch(() => ({}));
       if (res.ok) {
         data = payload;
@@ -156,15 +231,22 @@ Message: """${message}"""`;
     }
   }
   if (!data) throw new Error((lastError || "AI band") + " — 1 daqiqadan keyin qayta urinib ko'ring.");
-  const text = (data.candidates?.[0]?.content?.parts || [])
-    .filter((p) => p.text && !p.thought)
-    .map((p) => p.text)
-    .join("");
+  const text = (data.candidates?.[0]?.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
   try {
     return JSON.parse(text);
   } catch {
     throw new Error("AI javobini o'qib bo'lmadi. Qaytadan urinib ko'ring.");
   }
+}
+
+// Hisobni tanlash: AI aytgan nom → to'lov turi va valyutaga mos hisob → shu valyutadagi birinchi hisob
+function pickAccount(accounts, name, currency, paymentType) {
+  const active = accounts.filter((a) => !a.archived);
+  const byName = active.find((a) => same(a.name, name));
+  if (byName) return byName;
+  const ofCur = active.filter((a) => a.currency === currency);
+  const kind = paymentType === "naqd" ? "naqd" : paymentType === "karta" ? "karta" : paymentType === "otkazma" ? "bank" : null;
+  return (kind && ofCur.find((a) => a.kind === kind)) || ofCur[0] || null;
 }
 
 // ---------- Amallar ----------
@@ -173,114 +255,199 @@ async function addFromText(rawText) {
   const text = String(rawText || "").trim().slice(0, 2000);
   if (!text) throw new Error("Matn bo'sh");
 
-  const [categories, projects] = await Promise.all([
+  const today = tashkentToday();
+  const [categories, projects, accounts] = await Promise.all([
     sb("categories?select=id,name"),
     sb("projects?select=id,name"),
+    sb("accounts?select=id,name,currency,kind,archived&order=id"),
   ]);
   checkCategories(categories);
-  const today = tashkentToday();
-  const ai = await parseWithAI(
-    text,
-    categories.map((c) => c.name),
-    projects.map((p) => p.name),
-    today
-  );
+  // Kursni AI bilan bir vaqtda olamiz (vaqtni tejash uchun)
+  const ratesP = getRates(today).catch(() => ({ UZS: 1 }));
+  const ai = await parseWithAI(text, categories.map((c) => c.name), projects.map((p) => p.name), accounts.filter((a) => !a.archived), today);
+  const rates = await ratesP;
 
   const items = Array.isArray(ai.items) ? ai.items : [];
-  if (!items.length) {
-    return { saved: [], question: ai.question || "Summani topa olmadim. Aniqroq yozing." };
-  }
+  if (!items.length) return { saved: [], question: ai.question || "Summani topa olmadim. Aniqroq yozing." };
 
-  const same = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
   const fallbackCat = categories.find((c) => c.name === "Boshqa");
   const categoryId = (name) => (categories.find((c) => same(c.name, name)) || fallbackCat)?.id ?? null;
   const projectId = (name) => projects.find((p) => same(p.name, name))?.id ?? null;
-  const validDate = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || "") ? d : today);
+  const validDate = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || "") && d <= today ? d : today);
+  const notes = [];
 
-  const expenses = [];
-  const incomes = [];
+  const expenses = [], incomes = [], transfers = [];
   for (const it of items) {
-    const amount = Math.round(Number(it.amount) * 100) / 100;
+    const amount = round2(it.amount);
     if (!(amount > 0)) continue;
-    if (it.type === "income") {
-      incomes.push({
-        date: validDate(it.date),
-        amount,
-        project_id: projectId(it.project),
-        source: it.note || null,
-      });
-    } else {
-      expenses.push({
-        date: validDate(it.date),
-        amount,
-        category_id: categoryId(it.category),
-        project_id: projectId(it.project),
-        payment_type: PAYMENT_TYPES.includes(it.payment_type) ? it.payment_type : null,
-        note: it.note || null,
-      });
+    const pt = PAYMENT_TYPES.includes(it.payment_type) ? it.payment_type : null;
+    let cur = CURRENCIES.includes(it.currency) ? it.currency : "UZS";
+    const acc = pickAccount(accounts, it.account, cur, pt);
+    if (it.type === "transfer") {
+      const to = pickAccount(accounts, it.to_account, null, null);
+      if (!acc || !to || acc.id === to.id) { notes.push(`O'tkazma uchun hisoblar aniq emas: "${it.note}". Masalan: "Uzcarddan naqd so'mga 500 ming yechdim".`); continue; }
+      let toAmount = round2(it.to_amount);
+      if (!(toAmount > 0)) {
+        if (acc.currency === to.currency) toAmount = amount;
+        else {
+          const rf = rates[acc.currency], rt = rates[to.currency];
+          if (!rf || !rt) { notes.push(`Kurs topilmadi — o'tkazmada qancha tushganini ham yozing: "${it.note}".`); continue; }
+          toAmount = round2((amount * rf) / rt);
+        }
+      }
+      transfers.push({ date: validDate(it.date), from_account: acc.id, to_account: to.id, amount, to_amount: toAmount, note: it.note || null });
+      continue;
     }
+    let amt = amount, note = it.note || null;
+    if (!rates[cur]) { notes.push(`${cur} kursini ololmadim — "${it.note}" yozilmadi, keyinroq qayta urinib ko'ring.`); continue; }
+    // Hisob boshqa valyutada bo'lsa (masalan so'mli kartadan 20$ to'lov) — summa hisob valyutasiga o'giriladi
+    if (acc && acc.currency !== cur) {
+      if (!rates[acc.currency]) { notes.push(`${acc.currency} kursini ololmadim — "${it.note}" yozilmadi.`); continue; }
+      note = `${note || ""} (${amount} ${cur})`.trim();
+      amt = round2((amount * rates[cur]) / rates[acc.currency]);
+      cur = acc.currency;
+    }
+    const base = { date: validDate(it.date), amount: amt, currency: cur, rate: rates[cur], account_id: acc ? acc.id : null, project_id: projectId(it.project) };
+    if (it.type === "income") incomes.push({ ...base, source: note });
+    else expenses.push({ ...base, category_id: categoryId(it.category), payment_type: pt || (acc ? (acc.kind === "naqd" ? "naqd" : acc.kind === "karta" ? "karta" : "otkazma") : null), note });
   }
 
   const saved = [];
-  if (expenses.length) {
-    const rows = await sb(
-      "expenses?select=id,date,amount,note,payment_type,categories(name),projects(name)",
-      { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(expenses) }
-    );
-    saved.push(...rows.map((r) => formatRow(r, "expense")));
+  const post = (table, rows, select) => sb(`${table}?select=${select}`, { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(rows) });
+  const [e, i, t] = await Promise.all([
+    expenses.length ? post("expenses", expenses, "id,date,amount,currency,rate,account_id,note,payment_type,categories(name),projects(name)") : [],
+    incomes.length ? post("incomes", incomes, "id,date,amount,currency,rate,account_id,source,projects(name)") : [],
+    transfers.length ? post("transfers", transfers, "id,date,from_account,to_account,amount,to_amount,note") : [],
+  ]);
+  saved.push(...e.map((r) => formatRow(r, "expense", accounts)), ...i.map((r) => formatRow(r, "income", accounts)), ...t.map((r) => formatTransfer(r, accounts)));
+  return { saved, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
+}
+
+// Hisoblar qoldig'i: boshlang'ich + daromad − xarajat − chiqqan o'tkazma + kelgan o'tkazma
+async function accountBalances(accounts) {
+  const [ex, inc, tr] = await Promise.all([
+    sb("expenses?select=account_id,amount&account_id=not.is.null"),
+    sb("incomes?select=account_id,amount&account_id=not.is.null"),
+    sb("transfers?select=from_account,to_account,amount,to_amount"),
+  ]);
+  const bal = {};
+  for (const a of accounts) bal[a.id] = num(a.opening_balance);
+  for (const r of inc) if (r.account_id in bal) bal[r.account_id] += num(r.amount);
+  for (const r of ex) if (r.account_id in bal) bal[r.account_id] -= num(r.amount);
+  for (const r of tr) {
+    if (r.from_account in bal) bal[r.from_account] -= num(r.amount);
+    if (r.to_account in bal) bal[r.to_account] += num(r.to_amount);
   }
-  if (incomes.length) {
-    const rows = await sb("incomes?select=id,date,amount,source,projects(name)", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify(incomes),
-    });
-    saved.push(...rows.map((r) => formatRow(r, "income")));
-  }
-  return { saved, question: saved.length ? null : "Summani aniqlay olmadim." };
+  return bal;
 }
 
 async function summary() {
   const today = tashkentToday();
   const monthStart = today.slice(0, 8) + "01";
 
-  const [expenses, incomes, categories] = await Promise.all([
-    sb(`expenses?select=id,date,amount,note,payment_type,categories(name),projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
-    sb(`incomes?select=id,date,amount,source,projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
+  const [expenses, incomes, transfers, categories, accounts, rates] = await Promise.all([
+    sb(`expenses?select=id,date,amount,currency,rate,account_id,note,payment_type,categories(name),projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
+    sb(`incomes?select=id,date,amount,currency,rate,account_id,source,projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
+    sb(`transfers?select=id,date,from_account,to_account,amount,to_amount,note&date=gte.${monthStart}&order=date.desc,id.desc`),
     sb("categories?select=name,monthly_limit&order=name"),
+    sb("accounts?select=id,name,currency,kind,opening_balance,archived&order=id"),
+    getRates(today).catch(() => ({ UZS: 1 })),
   ]);
-
   checkCategories(categories);
+
+  const uzs = (r) => num(r.amount) * (num(r.rate) || 1);
   const spentBy = {};
   for (const e of expenses) {
     const name = e.categories?.name || "Boshqa";
-    spentBy[name] = (spentBy[name] || 0) + Number(e.amount);
+    spentBy[name] = (spentBy[name] || 0) + uzs(e);
   }
   const byCategory = categories
-    .map((c) => ({ name: c.name, spent: spentBy[c.name] || 0, limit: Number(c.monthly_limit) || 0 }))
+    .map((c) => ({ name: c.name, spent: Math.round(spentBy[c.name] || 0), limit: num(c.monthly_limit) }))
     .sort((a, b) => b.spent - a.spent);
 
+  const bal = await accountBalances(accounts);
+  const accList = accounts.filter((a) => !a.archived).map((a) => ({
+    id: a.id, name: a.name, currency: a.currency, kind: a.kind, opening_balance: num(a.opening_balance),
+    balance: round2(bal[a.id]), uzs: rates[a.currency] ? Math.round(bal[a.id] * rates[a.currency]) : null,
+  }));
+
   const recent = [
-    ...expenses.map((r) => formatRow(r, "expense")),
-    ...incomes.map((r) => formatRow(r, "income")),
+    ...expenses.map((r) => formatRow(r, "expense", accounts)),
+    ...incomes.map((r) => formatRow(r, "income", accounts)),
+    ...transfers.map((r) => formatTransfer(r, accounts)),
   ]
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id))
-    .slice(0, 30);
+    .slice(0, 40);
 
   return {
     month: monthStart.slice(0, 7),
-    totalExpense: expenses.reduce((s, e) => s + Number(e.amount), 0),
-    totalIncome: incomes.reduce((s, e) => s + Number(e.amount), 0),
+    totalExpense: Math.round(expenses.reduce((s, e) => s + uzs(e), 0)),
+    totalIncome: Math.round(incomes.reduce((s, e) => s + uzs(e), 0)),
     byCategory,
+    accounts: accList,
+    netWorth: accList.reduce((s, a) => s + (a.uzs || 0), 0),
+    rates: { USD: rates.USD || null, EUR: rates.EUR || null, RUB: rates.RUB || null },
     recent,
   };
 }
 
 async function removeRow(kind, id) {
-  const table = kind === "income" ? "incomes" : "expenses";
+  const table = kind === "income" ? "incomes" : kind === "transfer" ? "transfers" : "expenses";
   const rowId = parseInt(id, 10);
   if (!Number.isInteger(rowId)) throw new Error("Noto'g'ri ID");
   await sb(`${table}?id=eq.${rowId}`, { method: "DELETE" });
+  return { ok: true };
+}
+
+// Hisob qo'shish / o'zgartirish / arxivlash
+async function saveAccount(b) {
+  const row = {};
+  if (b.name !== undefined) {
+    row.name = String(b.name || "").trim().slice(0, 40);
+    if (!row.name) throw new Error("Hisob nomini yozing");
+  }
+  if (b.currency !== undefined) {
+    if (!CURRENCIES.includes(b.currency)) throw new Error("Valyuta: UZS, USD, EUR yoki RUB");
+    row.currency = b.currency;
+  }
+  if (b.kind !== undefined) {
+    if (!ACCOUNT_KINDS.includes(b.kind)) throw new Error("Turi: naqd, karta yoki bank");
+    row.kind = b.kind;
+  }
+  if (b.opening_balance !== undefined) {
+    const v = Number(String(b.opening_balance).replace(/\s/g, "").replace(",", "."));
+    if (!Number.isFinite(v)) throw new Error("Boshlang'ich qoldiq — raqam bo'lishi kerak");
+    row.opening_balance = round2(v);
+  }
+  if (b.archived !== undefined) row.archived = !!b.archived;
+  try {
+    if (b.id) {
+      const id = parseInt(b.id, 10);
+      if (!Number.isInteger(id)) throw new Error("Noto'g'ri ID");
+      await sb(`accounts?id=eq.${id}`, { method: "PATCH", body: JSON.stringify(row) });
+    } else {
+      if (!row.name) throw new Error("Hisob nomini yozing");
+      await sb("accounts", { method: "POST", body: JSON.stringify([{ currency: "UZS", kind: "naqd", opening_balance: 0, ...row }]) });
+    }
+  } catch (e) {
+    if (/duplicate|unique/i.test(e.message)) throw new Error("Bunday nomli hisob bor — boshqa nom tanlang");
+    throw e;
+  }
+  return { ok: true };
+}
+
+// "Hozir menda X bor" — boshlang'ich qoldiqni shunday tanlaydiki, joriy qoldiq aynan X bo'ladi
+async function setBalance(b) {
+  const id = parseInt(b.id, 10);
+  if (!Number.isInteger(id)) throw new Error("Noto'g'ri ID");
+  const target = Number(String(b.balance).replace(/\s/g, "").replace(",", "."));
+  if (!Number.isFinite(target)) throw new Error("Qoldiq — raqam bo'lishi kerak");
+  const accounts = await sb("accounts?select=id,name,currency,kind,opening_balance,archived&order=id");
+  const acc = accounts.find((a) => a.id === id);
+  if (!acc) throw new Error("Hisob topilmadi");
+  const bal = await accountBalances(accounts);
+  const opening = round2(num(acc.opening_balance) + (target - bal[id]));
+  await sb(`accounts?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ opening_balance: opening }) });
   return { ok: true };
 }
 
@@ -310,6 +477,10 @@ export default async (req) => {
         return json(await summary());
       case "delete":
         return json(await removeRow(body.kind, body.id));
+      case "account_save":
+        return json(await saveAccount(body));
+      case "account_balance":
+        return json(await setBalance(body));
       default:
         return json({ error: "Noma'lum amal" }, 400);
     }
