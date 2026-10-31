@@ -5,6 +5,17 @@
 //   GEMINI_MODEL (ixtiyoriy, standart: gemini-flash-latest)
 
 const PAYMENT_TYPES = ["naqd", "karta", "otkazma"];
+const FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+
+function checkCategories(categories) {
+  if (!categories.length) {
+    throw new Error(
+      "Bazadan kategoriyalar o'qilmadi. SUPABASE_SECRET ga 'sb_secret_...' kaliti qo'yilganini tekshiring (publishable kalit emas)."
+    );
+  }
+}
+
+// ---------- Yordamchi funksiyalar ----------
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -25,6 +36,7 @@ function tashkentToday() {
 function sbHeaders(extra = {}) {
   const key = process.env.SUPABASE_SECRET || "";
   const headers = { apikey: key, "Content-Type": "application/json", ...extra };
+  // Eski (legacy) service_role kalit JWT ko'rinishida bo'ladi va Authorization ham kerak
   if (key.startsWith("eyJ")) headers.Authorization = `Bearer ${key}`;
   return headers;
 }
@@ -52,6 +64,8 @@ function formatRow(row, kind) {
     note: row.note || row.source || "",
   };
 }
+
+// ---------- AI tahlil (Gemini) ----------
 
 async function parseWithAI(message, categoryNames, projectNames, today) {
   const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
@@ -103,21 +117,32 @@ Message: """${message}"""`;
     },
   };
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY || "",
-      },
-      body: JSON.stringify(body),
+  // Model band (503/429) yoki mavjud bo'lmasa (404), keyingi modelga o'tadi
+  const models = [...new Set([model, ...FALLBACK_MODELS])];
+  let data = null;
+  let lastError = "";
+  for (let i = 0; i < models.length && !data; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 800));
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${models[i]}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY || "",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    const payload = await res.json().catch(() => ({}));
+    if (res.ok) {
+      data = payload;
+    } else {
+      lastError = `AI xatosi (${res.status}, ${models[i]}): ${payload.error?.message || "noma'lum"}`;
+      if (![404, 429, 500, 503].includes(res.status)) throw new Error(lastError);
     }
-  );
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(`AI xatosi (${res.status}): ${data.error?.message || "noma'lum"}`);
   }
+  if (!data) throw new Error(lastError + " — bir daqiqadan keyin qayta urinib ko'ring.");
   const text = (data.candidates?.[0]?.content?.parts || [])
     .filter((p) => p.text && !p.thought)
     .map((p) => p.text)
@@ -129,6 +154,8 @@ Message: """${message}"""`;
   }
 }
 
+// ---------- Amallar ----------
+
 async function addFromText(rawText) {
   const text = String(rawText || "").trim().slice(0, 2000);
   if (!text) throw new Error("Matn bo'sh");
@@ -137,6 +164,7 @@ async function addFromText(rawText) {
     sb("categories?select=id,name"),
     sb("projects?select=id,name"),
   ]);
+  checkCategories(categories);
   const today = tashkentToday();
   const ai = await parseWithAI(
     text,
@@ -209,6 +237,7 @@ async function summary() {
     sb("categories?select=name,monthly_limit&order=name"),
   ]);
 
+  checkCategories(categories);
   const spentBy = {};
   for (const e of expenses) {
     const name = e.categories?.name || "Boshqa";
@@ -241,6 +270,8 @@ async function removeRow(kind, id) {
   await sb(`${table}?id=eq.${rowId}`, { method: "DELETE" });
   return { ok: true };
 }
+
+// ---------- Asosiy kirish nuqtasi ----------
 
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "Faqat POST so'rov qabul qilinadi" }, 405);
