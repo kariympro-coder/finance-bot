@@ -1,4 +1,4 @@
-// Finance bot — server funksiya (Netlify Functions) — v3 (1-bosqich: hisoblar va valyuta; 2-bosqich: chek rasmi va ovoz)
+// Finance bot — server funksiya (Netlify Functions) — v4 (1: hisoblar va valyuta; 2: chek rasmi va ovoz; 3: grafiklar, budjet limiti, loyiha foydasi)
 // Vazifasi: matnni AI (Gemini) orqali tahlil qiladi va Supabase bazaga yozadi.
 // Kerakli sozlamalar (Netlify → Environment variables):
 //   SUPABASE_URL, SUPABASE_SECRET, GEMINI_API_KEY, APP_PASSWORD
@@ -349,7 +349,18 @@ async function addFromText(rawText, media = null) {
     transfers.length ? post("transfers", transfers, "id,date,from_account,to_account,amount,to_amount,note") : [],
   ]);
   saved.push(...e.map((r) => formatRow(r, "expense", accounts)), ...i.map((r) => formatRow(r, "income", accounts)), ...t.map((r) => formatTransfer(r, accounts)));
-  return { saved, transcript, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
+  // Budjet: shu oyda limitga yaqinlashgan / oshgan kategoriyalar (faqat hozir yozilgan xarajat kategoriyalari)
+  let alerts = [];
+  try {
+    const touched = [...new Set(expenses.map((x) => x.category_id).filter(Boolean))];
+    const limited = touched.length ? await sb(`categories?select=id,name,monthly_limit&id=in.(${touched.join(",")})&monthly_limit=gt.0`) : [];
+    if (limited.length) {
+      const [mf, mt] = monthRange(today.slice(0, 7));
+      const rows = await sb(`expenses?select=amount,rate,category_id&category_id=in.(${limited.map((c) => c.id).join(",")})&date=gte.${mf}&date=lt.${mt}`);
+      alerts = budgetAlerts(limited.map((c) => ({ name: c.name, limit: num(c.monthly_limit), spent: Math.round(rows.filter((x) => x.category_id === c.id).reduce((s2, x) => s2 + uzsOf(x), 0)) })));
+    }
+  } catch {}
+  return { saved, transcript, alerts, question: notes.length ? notes.join(" ") : saved.length ? null : "Summani aniqlay olmadim." };
 }
  
 // Hisoblar qoldig'i: boshlang'ich + daromad − xarajat − chiqqan o'tkazma + kelgan o'tkazma
@@ -370,29 +381,77 @@ async function accountBalances(accounts) {
   return bal;
 }
  
-async function summary() {
-  const today = tashkentToday();
-  const monthStart = today.slice(0, 8) + "01";
+// Oy chegaralari: "2026-10" → ["2026-10-01", "2026-11-01"]
+function monthRange(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  const next = m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+  return [`${ym}-01`, `${next}-01`];
+}
+function addMonths(ym, k) {
+  let [y, m] = ym.split("-").map(Number);
+  m += k; while (m < 1) { m += 12; y--; } while (m > 12) { m -= 12; y++; }
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+const uzsOf = (r) => num(r.amount) * (num(r.rate) || 1);
  
-  const [expenses, incomes, transfers, categories, accounts, rates] = await Promise.all([
-    sb(`expenses?select=id,date,amount,currency,rate,account_id,note,payment_type,categories(name),projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
-    sb(`incomes?select=id,date,amount,currency,rate,account_id,source,projects(name)&date=gte.${monthStart}&order=date.desc,id.desc`),
-    sb(`transfers?select=id,date,from_account,to_account,amount,to_amount,note&date=gte.${monthStart}&order=date.desc,id.desc`),
-    sb("categories?select=name,monthly_limit&order=name"),
+// Budjet ogohlantirishlari: limitning 80% va 100% dan oshgan kategoriyalar
+function budgetAlerts(byCategory) {
+  return byCategory.filter((c) => c.limit > 0 && c.spent >= c.limit * 0.8).map((c) => ({
+    name: c.name, spent: c.spent, limit: c.limit, pct: Math.round((c.spent / c.limit) * 100), over: c.spent > c.limit,
+  }));
+}
+ 
+async function summary(monthParam) {
+  const today = tashkentToday();
+  const curMonth = today.slice(0, 7);
+  const month = /^\d{4}-\d{2}$/.test(monthParam || "") && monthParam <= curMonth ? monthParam : curMonth;
+  const [from, to] = monthRange(month);
+  const histFrom = monthRange(addMonths(month, -5))[0];
+  const range = `date=gte.${from}&date=lt.${to}`;
+ 
+  const [expenses, incomes, transfers, categories, projects, accounts, rates, histE, histI] = await Promise.all([
+    sb(`expenses?select=id,date,amount,currency,rate,account_id,note,payment_type,categories(name),projects(name)&${range}&order=date.desc,id.desc`),
+    sb(`incomes?select=id,date,amount,currency,rate,account_id,source,projects(name)&${range}&order=date.desc,id.desc`),
+    sb(`transfers?select=id,date,from_account,to_account,amount,to_amount,note&${range}&order=date.desc,id.desc`),
+    sb("categories?select=id,name,monthly_limit&order=name"),
+    sb("projects?select=id,name,status&order=id"),
     sb("accounts?select=id,name,currency,kind,opening_balance,archived&order=id"),
     getRates(today).catch(() => ({ UZS: 1 })),
+    sb(`expenses?select=date,amount,rate&date=gte.${histFrom}&date=lt.${to}`),
+    sb(`incomes?select=date,amount,rate&date=gte.${histFrom}&date=lt.${to}`),
   ]);
   checkCategories(categories);
  
-  const uzs = (r) => num(r.amount) * (num(r.rate) || 1);
+  // Kategoriyalar va limitlar
   const spentBy = {};
   for (const e of expenses) {
     const name = e.categories?.name || "Boshqa";
-    spentBy[name] = (spentBy[name] || 0) + uzs(e);
+    spentBy[name] = (spentBy[name] || 0) + uzsOf(e);
   }
   const byCategory = categories
-    .map((c) => ({ name: c.name, spent: Math.round(spentBy[c.name] || 0), limit: num(c.monthly_limit) }))
-    .sort((a, b) => b.spent - a.spent);
+    .map((c) => ({ id: c.id, name: c.name, spent: Math.round(spentBy[c.name] || 0), limit: num(c.monthly_limit) }))
+    .sort((a, b) => b.spent - a.spent || a.name.localeCompare(b.name));
+ 
+  // Kunlik xarajat (grafik uchun)
+  const days = new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 0)).getUTCDate();
+  const daily = Array.from({ length: days }, (_, i) => ({ day: i + 1, expense: 0, income: 0 }));
+  for (const e of expenses) daily[Number(e.date.slice(8, 10)) - 1].expense += uzsOf(e);
+  for (const e of incomes) daily[Number(e.date.slice(8, 10)) - 1].income += uzsOf(e);
+  daily.forEach((d) => { d.expense = Math.round(d.expense); d.income = Math.round(d.income); });
+ 
+  // Oxirgi 6 oy: daromad va xarajat
+  const months = Array.from({ length: 6 }, (_, i) => ({ month: addMonths(month, i - 5), income: 0, expense: 0 }));
+  const mIdx = (d) => months.findIndex((m) => m.month === d.slice(0, 7));
+  for (const e of histE) { const i = mIdx(e.date); if (i >= 0) months[i].expense += uzsOf(e); }
+  for (const e of histI) { const i = mIdx(e.date); if (i >= 0) months[i].income += uzsOf(e); }
+  months.forEach((m) => { m.income = Math.round(m.income); m.expense = Math.round(m.expense); });
+ 
+  // Loyihalar foydasi (shu oy)
+  const proj = {};
+  for (const p of projects) proj[p.name] = { name: p.name, status: p.status, income: 0, expense: 0 };
+  for (const e of expenses) if (e.projects?.name && proj[e.projects.name]) proj[e.projects.name].expense += uzsOf(e);
+  for (const e of incomes) if (e.projects?.name && proj[e.projects.name]) proj[e.projects.name].income += uzsOf(e);
+  const byProject = Object.values(proj).map((p) => ({ ...p, income: Math.round(p.income), expense: Math.round(p.expense), profit: Math.round(p.income - p.expense) }));
  
   const bal = await accountBalances(accounts);
   const accList = accounts.filter((a) => !a.archived).map((a) => ({
@@ -406,18 +465,43 @@ async function summary() {
     ...transfers.map((r) => formatTransfer(r, accounts)),
   ]
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id))
-    .slice(0, 40);
+    .slice(0, 60);
  
   return {
-    month: monthStart.slice(0, 7),
-    totalExpense: Math.round(expenses.reduce((s, e) => s + uzs(e), 0)),
-    totalIncome: Math.round(incomes.reduce((s, e) => s + uzs(e), 0)),
+    month,
+    isCurrent: month === curMonth,
+    today,
+    totalExpense: Math.round(expenses.reduce((s, e) => s + uzsOf(e), 0)),
+    totalIncome: Math.round(incomes.reduce((s, e) => s + uzsOf(e), 0)),
     byCategory,
+    alerts: budgetAlerts(byCategory),
+    daily,
+    months,
+    byProject,
     accounts: accList,
     netWorth: accList.reduce((s, a) => s + (a.uzs || 0), 0),
     rates: { USD: rates.USD || null, EUR: rates.EUR || null, RUB: rates.RUB || null },
     recent,
   };
+}
+ 
+// Kategoriya limiti (0 — limitsiz)
+async function setLimit(b) {
+  const id = parseInt(b.id, 10);
+  if (!Number.isInteger(id)) throw new Error("Noto'g'ri ID");
+  const v = Number(String(b.limit ?? "").replace(/\s/g, "").replace(",", ".")) || 0;
+  if (v < 0) throw new Error("Limit manfiy bo'lmaydi");
+  await sb(`categories?id=eq.${id}`, { method: "PATCH", body: JSON.stringify({ monthly_limit: Math.round(v) }) });
+  return { ok: true };
+}
+ 
+// Yangi kategoriya yoki loyiha
+async function addName(table, name) {
+  const n = String(name || "").trim().slice(0, 40);
+  if (!n) throw new Error("Nomini yozing");
+  try { await sb(table, { method: "POST", body: JSON.stringify([{ name: n }]) }); }
+  catch (e) { if (/duplicate|unique/i.test(e.message)) throw new Error("Bunday nom bor"); throw e; }
+  return { ok: true };
 }
  
 async function removeRow(kind, id) {
@@ -513,7 +597,13 @@ export default async (req) => {
       case "add":
         return json(await addFromText(body.text, checkMedia(body)));
       case "summary":
-        return json(await summary());
+        return json(await summary(body.month));
+      case "set_limit":
+        return json(await setLimit(body));
+      case "category_add":
+        return json(await addName("categories", body.name));
+      case "project_add":
+        return json(await addName("projects", body.name));
       case "delete":
         return json(await removeRow(body.kind, body.id));
       case "account_save":
@@ -529,3 +619,4 @@ export default async (req) => {
 };
  
 export const config = { path: "/api" };
+ 
