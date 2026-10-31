@@ -8,19 +8,23 @@
 <style>
   :root {
     --bg: #0f172a; --card: #1e293b; --line: #334155; --text: #f1f5f9;
-    --muted: #94a3b8; --accent: #22c55e; --red: #f87171; --blue: #60a5fa;
+    --muted: #94a3b8; --accent: #22c55e; --red: #f87171; --blue: #60a5fa; --amber: #fbbf24;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
     font: 16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
   .wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 40px; }
-  h1 { font-size: 22px; margin: 8px 0 16px; }
+  .top { display: flex; align-items: center; justify-content: space-between; margin: 8px 0 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  .chip { font-size: 13px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
-  textarea, input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  textarea, input, select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 10px; padding: 12px; font: inherit; }
   textarea { min-height: 84px; resize: vertical; }
   button { background: var(--accent); color: #052e16; border: 0; border-radius: 10px;
     padding: 12px 16px; font: inherit; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; }
+  button.ghost { background: transparent; color: var(--blue); border: 1px solid var(--line); }
+  button.small { width: auto; padding: 8px 12px; margin-top: 0; font-size: 14px; }
   button:disabled { opacity: .5; }
   .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
   .msg { margin-top: 10px; font-size: 14px; }
@@ -31,74 +35,97 @@
   .row { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .row:first-child { border-top: 0; }
   .row small { color: var(--muted); display: block; }
-  .amt { white-space: nowrap; font-weight: 600; }
-  .inc { color: var(--accent); } .exp { color: var(--text); }
+  .amt { white-space: nowrap; font-weight: 600; text-align: right; }
+  .inc { color: var(--accent); } .exp { color: var(--text); } .trf { color: var(--blue); } .neg { color: var(--red); }
   .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 4px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--blue); }
   .bar i.over { background: var(--red); }
   .del { background: none; color: var(--muted); width: auto; padding: 0 0 0 8px; margin: 0; font-size: 18px; }
-  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .net { font-size: 24px; font-weight: 700; margin: 2px 0 8px; }
+  .edit { border-top: 1px solid var(--line); padding: 12px 0; }
+  .edit:first-child { border-top: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .lbl { font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  .btns { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .hidden { display: none; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>💰 Moliya</h1>
-
+  <div class="top"><h1>💰 Moliya</h1><span id="rateChip" class="chip hidden"></span></div>
+ 
   <div id="login" class="card">
     <input id="pw" type="password" placeholder="Parol" autocomplete="current-password">
     <button id="loginBtn">Kirish</button>
     <div id="loginMsg" class="msg"></div>
   </div>
-
+ 
   <div id="app" class="hidden">
     <div class="card">
-      <textarea id="text" placeholder="Masalan: Kecha Jarvis reklamasiga 300 ming kartadan, bugun taksiga 50 ming naqd"></textarea>
+      <textarea id="text" placeholder="Masalan: Kecha Jarvis reklamasiga 300 ming Uzcarddan, bugun taksiga 50 ming naqd. Uzcarddan 500 ming naqd yechdim."></textarea>
       <button id="sendBtn">Yozish</button>
-      <div class="hint">Bir xabarda bir nechta xarajat yoki daromad yozsa bo'ladi.</div>
+      <div class="hint">Xarajat, daromad va hisoblar orasidagi o'tkazmani oddiy so'z bilan yozing. Dollar bo'lsa "$" yoki "dollar" deng — kurs Markaziy bankdan olinadi.</div>
       <div id="sendMsg" class="msg"></div>
     </div>
-
+ 
+    <div class="card">
+      <h2>Hisoblar <button id="manageBtn" class="ghost small">⚙️ Sozlash</button></h2>
+      <div class="hint" style="margin-top:0">Jami (so'mda)</div>
+      <div id="netWorth" class="net">0</div>
+      <div id="accounts"></div>
+      <div id="manage" class="hidden"></div>
+    </div>
+ 
     <div class="card">
       <h2 id="monthTitle">Shu oy</h2>
       <div class="totals">
-        <div><b id="tInc">0</b><span>Daromad</span></div>
+        <div><b id="tInc" class="inc">0</b><span>Daromad</span></div>
         <div><b id="tExp">0</b><span>Xarajat</span></div>
-        <div><b id="tBal">0</b><span>Qoldiq</span></div>
+        <div><b id="tBal">0</b><span>Farq</span></div>
       </div>
+      <div class="hint">So'mda; dollar yozuvlari yozilgan kungi kurs bilan hisoblangan. O'tkazmalar bu yerga kirmaydi.</div>
     </div>
-
+ 
     <div class="card">
       <h2>Kategoriyalar</h2>
       <div id="cats"></div>
     </div>
-
+ 
     <div class="card">
       <h2>Oxirgi yozuvlar</h2>
       <div id="recent"></div>
     </div>
   </div>
 </div>
-
+ 
 <script>
 const $ = (id) => document.getElementById(id);
 let password = "";
 try { password = sessionStorage.getItem("pw") || ""; } catch {}
-
-const fmt = (n) => Math.round(n).toLocaleString("ru-RU").replace(/,/g, " ");
+let state = null;
+ 
+const fmt = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU").replace(/,/g, " ");
+const fmtCur = (n, c) => {
+  if (c === "USD") return "$" + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-US");
+  if (c === "EUR") return "€" + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-US");
+  if (c === "RUB") return fmt(n) + " ₽";
+  return fmt(n) + " so'm";
+};
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
+const KIND = { naqd: "💵 Naqd", karta: "💳 Karta", bank: "🏦 Bank" };
+ 
 async function api(action, extra = {}) {
   const res = await fetch("/api", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, password, ...extra }),
   });
-  const data = await res.json().catch(() => ({ error: "Server javob bermadi" }));
+  const data = await res.json().catch(() => ({ error: "Server javob bermadi — 1 daqiqadan keyin qayta urinib ko'ring" }));
   if (!res.ok) throw new Error(data.error || "Xato");
   return data;
 }
-
+ 
 async function login() {
   password = $("pw").value.trim();
   $("loginMsg").textContent = "";
@@ -110,13 +137,19 @@ async function login() {
     $("loginMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   }
 }
-
+ 
 function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   load();
 }
-
+ 
+function savedLine(s) {
+  if (s.kind === "transfer") return `↔ ${esc(s.from)} → ${esc(s.to)}: ${fmtCur(s.amount, s.currency)}${s.currency !== s.to_currency ? " → " + fmtCur(s.to_amount, s.to_currency) : ""} (${s.date})`;
+  const what = s.kind === "income" ? "Daromad" : esc(s.category);
+  return `${what} — ${fmtCur(s.amount, s.currency)}, ${esc(s.note)}${s.account ? " · " + esc(s.account) : ""} (${s.date})`;
+}
+ 
 async function send() {
   const text = $("text").value.trim();
   if (!text) return;
@@ -124,30 +157,100 @@ async function send() {
   $("sendMsg").textContent = "AI tahlil qilmoqda…";
   try {
     const r = await api("add", { text });
-    if (r.saved.length) {
-      $("sendMsg").innerHTML = r.saved.map((s) =>
-        `<div class="ok">✓ ${s.kind === "income" ? "Daromad" : esc(s.category)} — ${fmt(s.amount)} so'm, ${esc(s.note)} (${s.date})</div>`
-      ).join("");
-      $("text").value = "";
-      load();
-    } else {
-      $("sendMsg").innerHTML = `<span class="err">${esc(r.question)}</span>`;
-    }
+    let h = r.saved.map((s) => `<div class="ok">✓ ${savedLine(s)}</div>`).join("");
+    if (r.question) h += `<div class="err">${esc(r.question)}</div>`;
+    $("sendMsg").innerHTML = h;
+    if (r.saved.length) { $("text").value = ""; load(); }
   } catch (e) {
     $("sendMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
   } finally {
     $("sendBtn").disabled = false;
   }
 }
-
-async function load() {
+ 
+function renderAccounts(d) {
+  $("netWorth").textContent = fmt(d.netWorth) + " so'm";
+  $("accounts").innerHTML = d.accounts.length ? d.accounts.map((a) => `
+    <div class="row">
+      <div>${esc(a.name)}<small>${KIND[a.kind] || a.kind} · ${a.currency}</small></div>
+      <div class="amt ${a.balance < 0 ? "neg" : ""}">${fmtCur(a.balance, a.currency)}${a.currency !== "UZS" && a.uzs != null ? `<small>≈ ${fmt(a.uzs)} so'm</small>` : ""}</div>
+    </div>`).join("") : `<div class="hint">Hisob yo'q — "⚙️ Sozlash"dan qo'shing.</div>`;
+}
+ 
+function renderManage(d) {
+  const opts = (list, cur, labels) => list.map((v) => `<option value="${v}" ${v === cur ? "selected" : ""}>${labels ? labels[v] : v}</option>`).join("");
+  $("manage").innerHTML = `
+    <div class="hint">Har bir hisobda <b>hozir qancha pul borligini</b> yozing — keyingi xarajat va daromadlar shundan hisoblanadi.</div>
+    ${d.accounts.map((a) => `
+      <div class="edit">
+        <input id="n_${a.id}" value="${esc(a.name)}">
+        <div class="grid2">
+          <select id="k_${a.id}">${opts(["naqd", "karta", "bank"], a.kind, KIND)}</select>
+          <input value="${a.currency}" disabled>
+        </div>
+        <div class="lbl">Hozirgi qoldiq (${a.currency})</div>
+        <input id="b_${a.id}" inputmode="decimal" value="${Math.round(a.balance * 100) / 100}">
+        <div class="btns">
+          <button class="small" data-save="${a.id}">Saqlash</button>
+          <button class="small ghost" data-arch="${a.id}">Yashirish</button>
+        </div>
+        <div id="m_${a.id}" class="msg"></div>
+      </div>`).join("")}
+    <div class="edit">
+      <div class="lbl">Yangi hisob</div>
+      <input id="n_new" placeholder="Nomi, masalan: Visa karta">
+      <div class="grid2">
+        <select id="k_new">${opts(["naqd", "karta", "bank"], "karta", KIND)}</select>
+        <select id="c_new">${opts(["UZS", "USD", "EUR", "RUB"], "UZS")}</select>
+      </div>
+      <div class="lbl">Hozirgi qoldiq</div>
+      <input id="b_new" inputmode="decimal" placeholder="0">
+      <button id="addAcc">+ Qo'shish</button>
+      <div id="m_new" class="msg"></div>
+    </div>`;
+}
+ 
+async function saveAcc(id) {
+  const m = $("m_" + id);
+  m.textContent = "Saqlanmoqda…";
+  try {
+    const a = state.accounts.find((x) => String(x.id) === String(id));
+    await api("account_save", { id, name: $("n_" + id).value, kind: $("k_" + id).value });
+    const b = $("b_" + id).value.trim();
+    if (b !== "" && Number(b.replace(/\s/g, "").replace(",", ".")) !== Math.round(a.balance * 100) / 100) await api("account_balance", { id, balance: b });
+    m.innerHTML = `<span class="ok">✓ Saqlandi</span>`;
+    load(true);
+  } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+ 
+async function addAcc() {
+  const m = $("m_new");
+  m.textContent = "Qo'shilmoqda…";
+  try {
+    await api("account_save", { name: $("n_new").value, kind: $("k_new").value, currency: $("c_new").value, opening_balance: $("b_new").value || 0 });
+    m.innerHTML = `<span class="ok">✓ Qo'shildi</span>`;
+    load(true);
+  } catch (e) { m.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+ 
+async function archAcc(id) {
+  if (!confirm("Bu hisobni yashirasizmi? Eski yozuvlar o'chmaydi.")) return;
+  try { await api("account_save", { id, archived: true }); load(true); } catch (e) { alert(e.message); }
+}
+ 
+async function load(keepManage) {
   try {
     const d = await api("summary");
+    state = d;
     $("monthTitle").textContent = `Shu oy (${d.month})`;
     $("tInc").textContent = fmt(d.totalIncome);
     $("tExp").textContent = fmt(d.totalExpense);
     $("tBal").textContent = fmt(d.totalIncome - d.totalExpense);
-
+    $("tBal").className = d.totalIncome - d.totalExpense < 0 ? "neg" : "";
+    if (d.rates && d.rates.USD) { $("rateChip").textContent = "$1 = " + fmt(d.rates.USD) + " so'm"; $("rateChip").classList.remove("hidden"); }
+    renderAccounts(d);
+    if (keepManage && !$("manage").classList.contains("hidden")) renderManage(d);
+ 
     $("cats").innerHTML = d.byCategory.map((c) => {
       const pct = c.limit ? Math.min(100, (c.spent / c.limit) * 100) : 0;
       const over = c.limit && c.spent > c.limit;
@@ -159,36 +262,63 @@ async function load() {
         ${c.limit ? `<div class="bar"><i class="${over ? "over" : ""}" style="width:${pct}%"></i></div>` : ""}
       </div>`;
     }).join("");
-
-    $("recent").innerHTML = d.recent.length ? d.recent.map((r) => `
-      <div class="row">
-        <div>${esc(r.note || (r.kind === "income" ? "Daromad" : r.category))}
-          <small>${r.date} · ${r.kind === "income" ? "Daromad" : esc(r.category)}${r.project ? " · " + esc(r.project) : ""}${r.payment_type ? " · " + r.payment_type : ""}</small>
-        </div>
-        <div style="display:flex;align-items:center">
-          <span class="amt ${r.kind === "income" ? "inc" : "exp"}">${r.kind === "income" ? "+" : "−"}${fmt(r.amount)}</span>
-          <button class="del" title="O'chirish" onclick="removeRow('${r.kind}', ${r.id})">×</button>
-        </div>
-      </div>`).join("") : `<div class="hint">Hozircha yozuv yo'q</div>`;
+ 
+    $("recent").innerHTML = d.recent.length ? d.recent.map((r) => {
+      if (r.kind === "transfer") return `
+        <div class="row">
+          <div>${esc(r.note || "O'tkazma")}<small>${r.date} · ↔ ${esc(r.from)} → ${esc(r.to)}</small></div>
+          <div style="display:flex;align-items:center">
+            <span class="amt trf">${fmtCur(r.amount, r.currency)}${r.currency !== r.to_currency ? `<small>→ ${fmtCur(r.to_amount, r.to_currency)}</small>` : ""}</span>
+            <button class="del" title="O'chirish" data-del="transfer:${r.id}">×</button>
+          </div>
+        </div>`;
+      return `
+        <div class="row">
+          <div>${esc(r.note || (r.kind === "income" ? "Daromad" : r.category))}
+            <small>${r.date} · ${r.kind === "income" ? "Daromad" : esc(r.category)}${r.project ? " · " + esc(r.project) : ""}${r.account ? " · " + esc(r.account) : r.payment_type ? " · " + r.payment_type : ""}</small>
+          </div>
+          <div style="display:flex;align-items:center">
+            <span class="amt ${r.kind === "income" ? "inc" : "exp"}">${r.kind === "income" ? "+" : "−"}${fmtCur(r.amount, r.currency)}${r.currency !== "UZS" ? `<small>≈ ${fmt(r.uzs)} so'm</small>` : ""}</span>
+            <button class="del" title="O'chirish" data-del="${r.kind}:${r.id}">×</button>
+          </div>
+        </div>`;
+    }).join("") : `<div class="hint">Hozircha yozuv yo'q</div>`;
   } catch (e) {
     if (/Parol/.test(e.message)) {
       try { sessionStorage.removeItem("pw"); } catch {}
       location.reload();
+    } else {
+      $("sendMsg").innerHTML = `<span class="err">${esc(e.message)}</span>`;
     }
   }
 }
-
+ 
 async function removeRow(kind, id) {
   if (!confirm("Bu yozuvni o'chirasizmi?")) return;
-  try { await api("delete", { kind, id }); load(); }
+  try { await api("delete", { kind, id }); load(true); }
   catch (e) { alert(e.message); }
 }
-
+ 
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.dataset.del) { const [k, id] = b.dataset.del.split(":"); removeRow(k, id); }
+  else if (b.dataset.save) saveAcc(b.dataset.save);
+  else if (b.dataset.arch) archAcc(b.dataset.arch);
+  else if (b.id === "addAcc") addAcc();
+  else if (b.id === "manageBtn") {
+    const m = $("manage");
+    m.classList.toggle("hidden");
+    b.textContent = m.classList.contains("hidden") ? "⚙️ Sozlash" : "Yopish";
+    if (!m.classList.contains("hidden") && state) renderManage(state);
+  }
+});
 $("loginBtn").onclick = login;
 $("pw").addEventListener("keydown", (e) => e.key === "Enter" && login());
 $("sendBtn").onclick = send;
-
+ 
 if (password) api("login").then(showApp).catch(() => {});
 </script>
 </body>
 </html>
+ 
